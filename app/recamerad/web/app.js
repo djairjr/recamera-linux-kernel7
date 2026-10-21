@@ -733,10 +733,15 @@ async function loadUpdate() {
   const u = await api("/api/update").catch(() => null);
   if (!u) return;
   const slot = (s) => (s ? s.toUpperCase() : "–");
-  kvTable($("#update-slots"), u.error ? [["Update", u.error]] : [
-    [`Running (slot ${slot(u.running)})`, u.running_version || "?"],
+  const rows = u.error ? [["Update", u.error]] : [
+    [`Running (slot ${slot(u.running)})`, (u.running_version || "?") +
+      (u.trial && u.trial.pending ? " — on trial: confirmed after 60 s running" : "")],
     [`Other (slot ${slot(u.inactive)})`, u.inactive_version || "–"],
-  ]);
+  ];
+  if (u.trial && u.trial.fell_back) {
+    rows.push(["Last update", `${u.trial.fell_back} did not come up: the camera went back to this version by itself`]);
+  }
+  kvTable($("#update-slots"), rows);
   showUpdate(u.state);
   return u;
 }

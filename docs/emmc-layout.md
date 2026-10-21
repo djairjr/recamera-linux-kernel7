@@ -130,10 +130,18 @@ p3 INSTALL  FAT32 320 MiB fip.bin, boot.itb, rootfs.ext4, uboot-env.bin, VERSION
 - **From a PC:** `scripts/slot-update.sh` to the inactive slot, `--switch`, test, then the
   other slot.
 - **From scratch, or a broken eMMC:** the card and `emmc-install --yes`.
-- **Pending:** a boot counter in `emmcboot` (the vendor U-Boot has `setexpr` and `saveenv`),
-  confirmed by `recamerad` once healthy, to fall back to the previous slot by itself after
-  three unconfirmed boots. `bootcmd` and `sdboot` stay untouched, so an inserted card always
-  boots first and stays the way back.
+- **Automatic fallback.** "Reboot into the new version" starts a trial: `prev` = the
+  running slot, `slot` = the new one, `try=1`, `bootcount=0`. While `try=1`, `emmcboot`
+  counts the boots (`setexpr`, `saveenv`: the vendor U-Boot has both); past 3 it sets `slot`
+  back to `prev`, `try=0` and `fallback=1`. The new system confirms itself (`try=0`) once
+  `recamerad` has run 60 s with video flowing; after a fallback the page says which version
+  did not come up, and `fallback` is cleared. `bootcmd` and `sdboot` are untouched: an
+  inserted card always boots first and stays the way back.
+  Tested 21/10/2026: a normal reboot; a trial confirmed after 72 s; and a version that never
+  confirms (its daemon disabled) booted 3 times, then the camera came back to the previous
+  slot by itself on the 4th boot (each boot ~16 s).
+  An existing camera gets the new `emmcboot` with `fw_setenv` (the line of
+  `uboot-env-emmc.txt`); a fresh install writes it.
 
 ## 7. What lives in `/data/recamera`
 

@@ -213,6 +213,7 @@ async fn handle(w: Arc<Web>, req: Request<Incoming>, local: IpAddr) -> Result<Re
                         "inactive_version": other_version,
                         "error": slots.err(),
                         "state": st,
+                        "trial": crate::update::TRIAL.lock().map(|t| t.clone()).unwrap_or_default(),
                     }))
                 }
                 (&Method::POST, "/api/update") => update_upload(&w, &user, req).await,

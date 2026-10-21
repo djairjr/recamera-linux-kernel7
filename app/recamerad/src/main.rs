@@ -195,6 +195,8 @@ async fn run(args: Args) -> ExitCode {
         (c.llm.enabled && !args.no_media).then(|| tokio::spawn(llm::run(c.llm.clone(), bus.clone(), live.clone())))
     };
     let mut llm_task = start_llm(&cfg);
+    // a trial boot after an update confirms itself once healthy
+    let trial_task = tokio::spawn(update::watch_trial(bus.clone()));
 
     // let the socket bind before the first event
     tokio::task::yield_now().await;
@@ -286,6 +288,7 @@ async fn run(args: Args) -> ExitCode {
 
     info!("stopping ({why})");
     bus.emit("stopping", &serde_json::json!({ "signal": why }));
+    trial_task.abort();
     for t in [web_task.take(), rtsp_task.take(), mqtt_task.take(), llm_task.take()].into_iter().flatten() {
         t.abort();
     }

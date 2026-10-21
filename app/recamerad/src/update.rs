@@ -325,9 +325,94 @@ fn with_boot<T>(f: impl FnOnce(&str) -> Result<T, String>) -> Result<T, String> 
     r
 }
 
-/// Boot the updated slot next.
-pub fn switch_to(slot: &str) -> Result<(), String> {
-    run("/usr/sbin/fw_setenv", &["slot", slot])?;
+// ---- trial boot and automatic fallback ------------------------------------
+//
+// "Reboot into the new version" starts a trial: prev = the running slot,
+// slot = the new one, try = 1, bootcount = 0 in the U-Boot environment. While
+// try = 1 its emmcboot counts the boots and saves; past 3 it sets slot back
+// to prev, try = 0 and fallback = 1 (uboot-env-emmc.txt). The new system
+// confirms itself (try = 0) once recamerad has run 60 s with video flowing.
+
+/// A variable of the U-Boot environment (fw_printenv).
+pub fn env(name: &str) -> Option<String> {
+    let o = Command::new("/usr/sbin/fw_printenv").args(["-n", name]).output().ok()?;
+    o.status.success().then(|| String::from_utf8_lossy(&o.stdout).trim().to_string())
+}
+
+/// Set several variables in one write of the environment (fw_setenv -s).
+pub fn set_env(vars: &[(&str, &str)]) -> Result<(), String> {
+    let script = "/run/recamerad/fw_setenv.script";
+    let body: String = vars.iter().map(|(k, v)| format!("{k} {v}\n")).collect();
+    std::fs::write(script, body).map_err(|e| format!("{script}: {e}"))?;
+    let r = run("/usr/sbin/fw_setenv", &["-s", script]);
+    let _ = std::fs::remove_file(script);
     let _ = Command::new("/bin/sync").status();
-    Ok(())
+    r
+}
+
+/// Boot the updated slot next, on trial.
+pub fn switch_to(slot: &str) -> Result<(), String> {
+    let (running, _) = slots()?;
+    set_env(&[("prev", running), ("slot", slot), ("try", "1"), ("bootcount", "0")])
+}
+
+/// What the page says about the last trial: on trial now, or fallen back.
+#[derive(Serialize, Clone, Default)]
+pub struct Trial {
+    /// this boot is a trial not confirmed yet
+    pub pending: bool,
+    /// the previous boot sequence fell back: the version that failed
+    pub fell_back: Option<String>,
+}
+
+pub static TRIAL: Mutex<Trial> = Mutex::new(Trial { pending: false, fell_back: None });
+
+/// At start: report a fallback, and confirm a trial once healthy.
+pub async fn watch_trial(bus: crate::events::Bus) {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let Ok((running, other)) = slots() else { return };
+    if cmdline.split_whitespace().any(|a| a == "recamera.fallback=1") {
+        let failed = slot_version(other).unwrap_or_else(|| format!("slot {other}"));
+        crate::warn!("update: {failed} did not come up; back on slot {running}");
+        bus.emit("update_fell_back", &serde_json::json!({ "failed": failed, "slot": running }));
+        if let Ok(mut t) = TRIAL.lock() {
+            t.fell_back = Some(failed);
+        }
+        if env("fallback").as_deref() == Some("1") {
+            let _ = set_env(&[("fallback", "0")]);
+        }
+    }
+    if env("try").as_deref() != Some("1") || env("slot").as_deref() != Some(running) {
+        return;
+    }
+    if let Ok(mut t) = TRIAL.lock() {
+        t.pending = true;
+    }
+    crate::info!("update: trial boot of slot {running} (boot {}), confirming once healthy",
+                 env("bootcount").unwrap_or_default());
+    // healthy: 60 s up and the stream channel delivering frames
+    let start = std::time::Instant::now();
+    let mut rx = bus.subscribe();
+    loop {
+        let Ok(line) = rx.recv().await else { continue };
+        if start.elapsed() < std::time::Duration::from_secs(60) || !line.contains("\"type\":\"media\"") {
+            continue;
+        }
+        let fps = serde_json::from_str::<serde_json::Value>(&line).ok()
+            .and_then(|v| v.get("ch1_fps").and_then(|f| f.as_f64())).unwrap_or(0.0);
+        if fps <= 0.0 {
+            continue;
+        }
+        match set_env(&[("try", "0"), ("bootcount", "0")]) {
+            Ok(()) => {
+                crate::info!("update: slot {running} confirmed");
+                bus.emit("update_confirmed", &serde_json::json!({ "slot": running }));
+                if let Ok(mut t) = TRIAL.lock() {
+                    t.pending = false;
+                }
+            }
+            Err(e) => crate::error!("update: confirming slot {running}: {e}"),
+        }
+        return;
+    }
 }

@@ -38,7 +38,7 @@ Nano). The **pitfalls** section is the part most worth reading.
 | NPU: any YOLOv8/YOLO11 `.cvimodel` — detect, pose (any keypoint count), segment, classify | ✅ detect ~25 fps, pose ~17, segment ~12, classify 30, with the stream running |
 | `recamerad`: web page, WebRTC, RTSP, MJPEG, MQTT + Home Assistant, LLM/VLM, browser terminal | ✅ |
 | Wi-Fi HaLow (optional Morse Micro module) | ✅ ported, ⏳ untested (no module here) |
-| System update from the web page (into the inactive slot, ~1 min, checked) | ✅ automatic fallback after a bad update ⏳ |
+| System update from the web page (into the inactive slot, ~1 min, checked), automatic fallback after 3 unconfirmed boots | ✅ |
 | Wi-Fi onboarding without a cable, Bluetooth configuration | ⏳ |
 
 Measured with everything on (detection, RTSP and MJPEG viewers): the daemon uses ~29 % CPU

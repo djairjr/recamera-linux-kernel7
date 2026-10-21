@@ -240,8 +240,6 @@ configuration directly from `/data` made the boot handshake take minutes (cause 
 
 ## 9. Not done yet
 
-- The automatic fallback after an update that does not come up (a boot counter in the
-  U-Boot environment; the update itself is done).
 - Wi-Fi onboarding without a cable (a temporary access point).
 - Bluetooth (GATT) configuration.
 - Policies in the daemon: automatic LED from the ISP's ISO, the thermal degradation order
