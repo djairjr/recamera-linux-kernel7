@@ -1,4 +1,4 @@
-# recamera-linux-kernel7
+# Seeed Studio Recamera 2002W with Linux Kernel 7.2
 
 **Linux 7.2 and a lean Rust application for the Seeed reCamera 2002 (Sophgo SG2002, RISC-V).**
 
