@@ -142,6 +142,15 @@
           <h3>Terminal</h3>
           <label class="row"><input type="checkbox" id="terminal-on"> Terminal page (a shell in the browser)</label>
 
+          <h3>Update</h3>
+          <table id="update-slots" class="kv"></table>
+          <p class="muted">A <code>recamera-update-*.rcu</code> from the build (output/…/images) is written
+            into the slot not in use; the running system, the boot firmware and /data are not touched.</p>
+          <input type="file" id="update-file" accept=".rcu">
+          <progress id="update-progress" max="1" value="0" hidden></progress>
+          <p id="update-state" class="muted"></p>
+          <button id="update-reboot" type="button" hidden>Reboot into the new version</button>
+
           <h3>Restart</h3>
           <button id="reboot">Reboot the camera</button>
         </div>

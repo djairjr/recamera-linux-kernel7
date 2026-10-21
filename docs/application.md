@@ -150,8 +150,9 @@ The page (`recamerad/web/`, plain HTML/JS/CSS, no framework) is built into the b
 - **LLM:** endpoint, model, key, prompt, limits, Test with the current frame (shows the
   picture sent and the answer), the last answers.
 - **System:** version, slot, addresses, uptime, temperature, load, memory, YOLO and camera
-  rates; time zone; password; terminal on/off; reboot; the last 300 log lines; crash
-  reports (pstore).
+  rates; time zone; password; terminal on/off; **update** (the version in each slot, upload
+  of a `recamera-update-*.rcu` into the slot not in use with its progress, reboot into it:
+  `docs/emmc-layout.md` §6); reboot; the last 300 log lines; crash reports (pstore).
 - **Terminal:** a login on the camera (`/bin/login` on a PTY): user and password, then that
   account's shell; up to 4 at once; the `Origin` is checked; stays open across sections.
 
@@ -166,6 +167,7 @@ The page (`recamerad/web/`, plain HTML/JS/CSS, no framework) is built into the b
 | `/api/mqtt`, `/api/mqtt/test` | GET, POST |
 | `/api/llm`, `/api/llm/test` | GET, POST |
 | `/api/terminal` | GET (WebSocket) |
+| `/api/update`, `/api/update/reboot` | GET, POST (the `.rcu` as the body); POST |
 | `/live` (SSE), `/stream.mjpg`, `/snapshot.jpg`, `/whep` | GET, GET, GET, POST/DELETE |
 
 ## 5. MQTT and Home Assistant
@@ -238,8 +240,8 @@ configuration directly from `/data` made the boot handshake take minutes (cause 
 
 ## 9. Not done yet
 
-- Firmware update from the page (System): upload an image, write the inactive slot,
-  switch with an automatic fallback if it does not come up.
+- The automatic fallback after an update that does not come up (a boot counter in the
+  U-Boot environment; the update itself is done).
 - Wi-Fi onboarding without a cable (a temporary access point).
 - Bluetooth (GATT) configuration.
 - Policies in the daemon: automatic LED from the ISP's ISO, the thermal degradation order

@@ -21,7 +21,7 @@ hand, kept in `/tmp`, or left in loose folders outside the tree.
 | `tools/recamera-convert/` | PC tool: YOLO `.pt`/`.onnx` → `.cvimodel` + `.json` (TPU-MLIR in Docker) | `cargo build --release` on the host |
 | `scripts/` | deployment, ports, models, diagnostics (§4) | source |
 | `docs/` | documentation | source |
-| `output/` | Buildroot output (`images/`: `sdcard.img`, `rootfs.ext4`, `boot.itb`, `fip.bin`) | `make` |
+| `output/` | Buildroot output (`images/`: `sdcard.img`, `rootfs.ext4`, `boot.itb`, `fip.bin`, `recamera-update-*.rcu`) | `make` |
 | `dl/` | Buildroot downloads | `make` |
 | `.ccache/` | compiler cache (§3) | `make` |
 | `work/` | scratch areas: ports (`work/<package>/a,b,build`), models (`work/models/`), Rust target | `scripts/` |

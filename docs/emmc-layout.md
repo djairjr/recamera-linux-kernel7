@@ -109,12 +109,31 @@ p3 INSTALL  FAT32 320 MiB fip.bin, boot.itb, rootfs.ext4, uboot-env.bin, VERSION
 
 ## 6. Updating
 
-- **The whole system:** `scripts/slot-update.sh` to the inactive slot, `--switch`, test,
-  then the other slot. The previous slot stays as it was until then.
+- **From the web page** (System → Update): the build makes
+  `output/.../images/recamera-update-<version>.rcu`, a tar of `manifest.json` (version, size
+  and sha256 of each image), `boot.itb` and `rootfs.ext4.zst` (the 200 MB rootfs image
+  compressed with zstd: ~23 MB; the package ~28 MB). `recamerad` (`update.rs`) receives it
+  and, while it arrives, writes the **inactive** slot:
+  1. removes that slot's kernel first, so a slot half written can never be booted;
+  2. decodes the rootfs straight onto the partition, checking size and sha256 against the
+     manifest, then reads the partition back and checks again;
+  3. `e2fsck`, `resize2fs` to the partition, its own label and UUID;
+  4. writes `boot-<slot>.itb` (as `.new`, read back, renamed).
+
+  Nothing is kept whole in memory or on disk but the 5 MB kernel; the running slot, the fip
+  and `/data` are not touched, and the camera keeps working meanwhile. Then "Reboot into the
+  new version" sets `slot` and reboots. Measured: 1 min 13 s for the whole upload and write
+  over USB, the camera back in ~25 s on the new slot. A wrong file, a cut upload or a
+  corrupted package are refused with a message, leaving the running system as it was.
+  The package is not signed (owner's choice): whoever has the page password can install an
+  image, as they can over ssh.
+- **From a PC:** `scripts/slot-update.sh` to the inactive slot, `--switch`, test, then the
+  other slot.
 - **From scratch, or a broken eMMC:** the card and `emmc-install --yes`.
-- **Pending:** a boot counter in the environment with a confirmation from the running
-  system, to fall back to the previous slot by itself; and the update from the web page
-  (System section).
+- **Pending:** a boot counter in `emmcboot` (the vendor U-Boot has `setexpr` and `saveenv`),
+  confirmed by `recamerad` once healthy, to fall back to the previous slot by itself after
+  three unconfirmed boots. `bootcmd` and `sdboot` stay untouched, so an inserted card always
+  boots first and stays the way back.
 
 ## 7. What lives in `/data/recamera`
 

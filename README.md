@@ -38,7 +38,8 @@ Nano). The **pitfalls** section is the part most worth reading.
 | NPU: any YOLOv8/YOLO11 `.cvimodel` — detect, pose (any keypoint count), segment, classify | ✅ detect ~25 fps, pose ~17, segment ~12, classify 30, with the stream running |
 | `recamerad`: web page, WebRTC, RTSP, MJPEG, MQTT + Home Assistant, LLM/VLM, browser terminal | ✅ |
 | Wi-Fi HaLow (optional Morse Micro module) | ✅ ported, ⏳ untested (no module here) |
-| Firmware update from the page, Wi-Fi onboarding without a cable, Bluetooth configuration | ⏳ |
+| System update from the web page (into the inactive slot, ~1 min, checked) | ✅ automatic fallback after a bad update ⏳ |
+| Wi-Fi onboarding without a cable, Bluetooth configuration | ⏳ |
 
 Measured with everything on (detection, RTSP and MJPEG viewers): the daemon uses ~29 % CPU
 and 7–17 MB of RSS, ION 26–36 of 48 MB depending on the model, ~164 MB of RAM available.
@@ -78,8 +79,9 @@ will do, then `emmc-install --yes`. Power off, remove the card, power on.
   YOLOv8/YOLO11 model (detect, pose, segment, classify; `.pt` or `.onnx`) on a PC with
   `tools/recamera-convert` and upload the `.cvimodel` and `.json` on the YOLO page, or
   extract the factory ones with `scripts/models.sh` from the official Seeed image;
-- updates: `scripts/slot-update.sh --switch` writes a new build to the inactive slot over
-  ssh and boots it; the previous slot stays as it was.
+- updates: on the System page, upload `output/sg2002_recamera_emmc/images/recamera-update-*.rcu`
+  (written into the slot not in use, then "Reboot into the new version"), or from the PC
+  `scripts/slot-update.sh --switch`; the previous slot stays as it was.
 
 More in `docs/build-environment.md`.
 

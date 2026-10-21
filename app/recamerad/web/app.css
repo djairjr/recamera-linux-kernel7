@@ -71,6 +71,7 @@ main { flex: 1; padding: 20px; min-width: 0; }
 .models button { padding: 2px 8px; font-size: .85em; }
 .events a { color: var(--accent); cursor: pointer; }
 textarea { font: inherit; padding: 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--text); resize: vertical; }
+#update-progress { width: 100%; height: 10px; }
 .shot { max-width: 100%; border-radius: 8px; display: block; margin: 8px 0; }
 .answer { white-space: pre-wrap; }
 .events li.bad { color: var(--bad); }

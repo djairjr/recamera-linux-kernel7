@@ -13,6 +13,8 @@
 //! - `GET /api/llm`, `POST /api/llm/test`: the last answers, a try with the
 //!   current frame (A8b)
 //! - `GET /api/terminal`: the terminal's WebSocket (A8c, terminal.rs)
+//! - `GET /api/update`, `POST /api/update` (the .rcu as the body, streamed
+//!   into the inactive slot), `POST /api/update/reboot` (A8d, update.rs)
 //! - `/vendor/…`: xterm.js for the terminal (web/vendor, MIT)
 //!
 //! Every stream is a task that reads the newest value (tokio watch) and
@@ -74,6 +76,8 @@ pub struct Web {
     last_mqtt: Mutex<Option<serde_json::Value>>,
     /// the last "llm" events, newest first
     last_llm: Mutex<std::collections::VecDeque<serde_json::Value>>,
+    /// system update from the page (one for the life of the daemon)
+    updater: &'static crate::update::Updater,
     #[cfg(feature = "webrtc")]
     webrtc: Arc<crate::webrtc::Sessions>,
 }
@@ -97,6 +101,7 @@ impl Web {
             last_media: Mutex::new(None),
             last_mqtt: Mutex::new(None),
             last_llm: Mutex::default(),
+            updater: Box::leak(Box::new(crate::update::Updater::new())),
             #[cfg(feature = "webrtc")]
             webrtc: Arc::default(),
         })
@@ -188,6 +193,42 @@ async fn handle(w: Arc<Web>, req: Request<Incoming>, local: IpAddr) -> Result<Re
                 }
                 (&Method::POST, "/api/config") => set_config(&w, req).await,
                 (&Method::GET, "/api/status") => json(StatusCode::OK, &status(&w)),
+                (&Method::GET, "/api/update") => {
+                    let slots = crate::update::slots();
+                    let (cur, other) = match &slots {
+                        Ok((c, o)) => (Some(*c), Some(*o)),
+                        Err(_) => (None, None),
+                    };
+                    let st = w.updater.state();
+                    // the other slot's version, unless it is being written
+                    let other_version = other.filter(|_| !matches!(st.phase.as_str(), "receiving" | "verifying" | "finishing"))
+                        .and_then(crate::update::slot_version);
+                    json(StatusCode::OK, &serde_json::json!({
+                        "running": cur, "inactive": other,
+                        "running_version": cur.and_then(crate::update::slot_version),
+                        "inactive_version": other_version,
+                        "error": slots.err(),
+                        "state": st,
+                    }))
+                }
+                (&Method::POST, "/api/update") => update_upload(&w, &user, req).await,
+                (&Method::POST, "/api/update/reboot") => {
+                    let st = w.updater.state();
+                    match st.target.as_deref().filter(|_| st.phase == "ready") {
+                        Some(t) => match crate::update::switch_to(t) {
+                            Ok(()) => {
+                                crate::warn!("web: {user} reboots into the updated slot {t}");
+                                tokio::spawn(async {
+                                    tokio::time::sleep(Duration::from_secs(1)).await;
+                                    let _ = std::process::Command::new("/sbin/reboot").status();
+                                });
+                                json(StatusCode::OK, &serde_json::json!({ "rebooting": t }))
+                            }
+                            Err(e) => json(StatusCode::INTERNAL_SERVER_ERROR, &serde_json::json!({ "error": e })),
+                        },
+                        None => json(StatusCode::CONFLICT, &serde_json::json!({ "error": "no update ready to boot" })),
+                    }
+                }
                 (&Method::GET, "/api/model") => {
                     let m = w.live.model.lock().map(|m| m.clone()).unwrap_or_else(|_| Arc::from("{}"));
                     let mut r = Response::new(full(m.to_string()));
@@ -482,6 +523,45 @@ async fn upload_model(req: Request<Incoming>, name: &str) -> Response<RespBody> 
             json(StatusCode::OK, &serde_json::json!({ "name": name, "size": total }))
         }
         Err(e) => bad(e),
+    }
+}
+
+/// POST /api/update: the body is a recamera-update-*.rcu, handed chunk by
+/// chunk to the installer thread (update.rs), which writes the inactive slot
+/// while it arrives.
+async fn update_upload(w: &Arc<Web>, user: &str, req: Request<Incoming>) -> Response<RespBody> {
+    let busy = match w.updater.begin() {
+        Ok(b) => b,
+        Err(e) => return json(StatusCode::CONFLICT, &serde_json::json!({ "error": e })),
+    };
+    crate::warn!("web: {user} uploads a system update");
+    let (tx, rx) = mpsc::channel::<Bytes>(16);
+    let up = w.updater;
+    let worker = tokio::task::spawn_blocking(move || crate::update::install(up, rx));
+    let mut body = req.into_body();
+    let mut upload_err = None;
+    while let Some(frame) = body.frame().await {
+        match frame {
+            Ok(fr) => {
+                if let Ok(d) = fr.into_data()
+                    && tx.send(d).await.is_err()
+                {
+                    break; // the installer stopped (an error it reports)
+                }
+            }
+            Err(e) => {
+                upload_err = Some(format!("upload interrupted: {e}"));
+                break;
+            }
+        }
+    }
+    drop(tx);
+    let r = worker.await.unwrap_or_else(|e| Err(format!("installer: {e}")));
+    drop(busy);
+    match (r, upload_err) {
+        (Ok(v), _) => json(StatusCode::OK, &serde_json::json!({ "version": v, "state": w.updater.state() })),
+        (Err(e), Some(u)) => json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": format!("{u} ({e})") })),
+        (Err(e), None) => json(StatusCode::BAD_REQUEST, &serde_json::json!({ "error": e })),
     }
 }
 

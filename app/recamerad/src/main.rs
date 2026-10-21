@@ -18,6 +18,7 @@ mod rtsp;
 mod system;
 mod telemetry;
 mod terminal;
+mod update;
 mod web;
 #[cfg(feature = "webrtc")]
 mod webrtc;

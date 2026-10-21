@@ -691,6 +691,7 @@ async function loadSystem() {
   for (const z of ["UTC", ...zones.filter((z) => z !== "UTC")]) sel.add(new Option(z, z));
   sel.value = config.system.timezone;
   $("#terminal-on").checked = config.web.terminal;
+  loadUpdate();
   loadLog();
   loadCrashes();
 }
@@ -719,6 +720,82 @@ $("#reboot").addEventListener("click", async () => {
   await api("/api/reboot", {}).catch(() => {});
   $("#reboot").textContent = "Rebooting…";
   $("#reboot").disabled = true;
+});
+
+// ---- system update (A8d) ----------------------------------------------------------------
+
+async function loadUpdate() {
+  const u = await api("/api/update").catch(() => null);
+  if (!u) return;
+  const slot = (s) => (s ? s.toUpperCase() : "–");
+  kvTable($("#update-slots"), u.error ? [["Update", u.error]] : [
+    [`Running (slot ${slot(u.running)})`, u.running_version || "?"],
+    [`Other (slot ${slot(u.inactive)})`, u.inactive_version || "–"],
+  ]);
+  showUpdate(u.state);
+  return u;
+}
+
+function showUpdate(st) {
+  const p = $("#update-progress"), t = $("#update-state");
+  const mb = (b) => (b / 1048576).toFixed(1) + " MB";
+  const active = ["receiving", "verifying", "finishing"].includes(st.phase);
+  p.hidden = !active;
+  if (st.phase === "receiving") {
+    p.max = st.total || 1; p.value = st.written;
+    t.textContent = `Writing slot ${(st.target || "").toUpperCase()}: ${mb(st.written)} of ${mb(st.total)} ` +
+      `(${mb(st.received)} received)`;
+  } else if (st.phase === "verifying") {
+    p.removeAttribute("value"); t.textContent = "Reading the slot back to check it…";
+  } else if (st.phase === "finishing") {
+    p.removeAttribute("value"); t.textContent = "Resizing the file system and writing the kernel…";
+  } else if (st.phase === "ready" || st.phase === "error") {
+    t.textContent = st.message;
+  }
+  t.classList.toggle("error", st.phase === "error");
+  $("#update-reboot").hidden = st.phase !== "ready";
+}
+
+$("#update-file").addEventListener("change", (e) => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (!confirm(`Write ${f.name} into the slot not in use? The camera keeps running meanwhile.`)) {
+    e.target.value = ""; return;
+  }
+  const t = $("#update-state"), p = $("#update-progress");
+  // the upload itself (browser side), then the daemon's state while it writes
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/update");
+  xhr.upload.onprogress = (ev) => {
+    if (ev.lengthComputable && ev.loaded < ev.total) {
+      p.hidden = false; p.max = ev.total; p.value = ev.loaded;
+      t.textContent = `Sending ${f.name}: ${Math.round(ev.loaded / ev.total * 100)}%`;
+    }
+  };
+  const poll = setInterval(async () => {
+    const u = await api("/api/update").catch(() => null);
+    if (u && ["receiving", "verifying", "finishing"].includes(u.state.phase)) showUpdate(u.state);
+  }, 1000);
+  xhr.onloadend = async () => {
+    clearInterval(poll);
+    e.target.value = "";
+    if (xhr.status !== 200) {
+      let msg = xhr.statusText;
+      try { msg = JSON.parse(xhr.responseText).error || msg; } catch {}
+      t.textContent = "Update failed: " + msg; t.classList.add("error"); p.hidden = true;
+    }
+    await loadUpdate();
+  };
+  xhr.send(f);
+});
+
+$("#update-reboot").addEventListener("click", async () => {
+  if (!confirm("Reboot into the new version now? The camera comes back in about 30 s.")) return;
+  try {
+    const r = await api("/api/update/reboot", {});
+    $("#update-state").textContent = `Rebooting into slot ${r.rebooting.toUpperCase()}…`;
+    $("#update-reboot").hidden = true;
+  } catch (err) { $("#update-state").textContent = err.message; }
 });
 
 async function loadLog() {

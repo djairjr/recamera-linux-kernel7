@@ -84,5 +84,25 @@ cp -f "${TARGET_DIR}/etc/recamera-version" "${BINARIES_DIR}/VERSION"
 # runs from the Buildroot directory, with BINARIES_DIR and HOST_DIR exported.
 support/scripts/genimage.sh -c "${BOARD_DIR}/genimage.cfg"
 
+# The update package for the web page (System -> Update): a tar of the
+# manifest (first: recamerad reads it before the images), the kernel FIT and
+# the rootfs image compressed with zstd (200 MB of mostly empty ext4 -> ~20
+# MB). recamerad streams it into the inactive slot. docs/emmc-layout.md.
+(
+	cd "${BINARIES_DIR}"
+	VER=$(cat VERSION)
+	TAG=$(echo "${VER}" | sed 's/^reCamera //; s/[^A-Za-z0-9.]/-/g')
+	RFS=$(readlink -f rootfs.ext4)
+	rm -f rootfs.ext4.zst recamera-update-*.rcu
+	"${HOST_DIR}/bin/zstd" -q -10 -T0 -o rootfs.ext4.zst "${RFS}"
+	printf '{"format": 1, "version": "%s",\n "kernel": {"file": "boot.itb", "size": %s, "sha256": "%s"},\n "rootfs": {"file": "rootfs.ext4.zst", "size": %s, "sha256": "%s"}}\n' \
+		"${VER}" "$(stat -c%s boot.itb)" "$(sha256sum boot.itb | cut -d' ' -f1)" \
+		"$(stat -c%s "${RFS}")" "$(sha256sum "${RFS}" | cut -d' ' -f1)" > manifest.json
+	tar --format=ustar --owner=0 --group=0 --numeric-owner --mode=0644 \
+		-cf "recamera-update-${TAG}.rcu" manifest.json boot.itb rootfs.ext4.zst
+	rm -f rootfs.ext4.zst manifest.json
+	echo "post-image: recamera-update-${TAG}.rcu $(stat -c%s "recamera-update-${TAG}.rcu") bytes"
+)
+
 echo "post-image: boot.sd $(stat -c%s "${BINARIES_DIR}/boot.sd") bytes," \
 	"sdcard.img $(stat -c%s "${BINARIES_DIR}/sdcard.img") bytes"
