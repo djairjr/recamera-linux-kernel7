@@ -5,6 +5,11 @@
 //! - ch0: 640x640 RGB packed, aspect kept with grey (114) bars: the YOLO input
 //! - ch1: 1280x720 NV21, the 16:9 centre band of a 4:3 mode: the stream
 //!
+//! Models: any YOLOv8/YOLO11 task (detection, pose, segment, classify), told
+//! apart by the outputs (sophgo::yolo); ch0 takes the model's input size
+//! (letterboxed whole frame; a centre square for classify). Pose keypoints
+//! and segment masks go to the page with the boxes.
+//!
 //! Detection (stage A4): boxes in stream coordinates (0..1, the picture the
 //! web page shows), a box counts when its paws are in the ROI and it is big
 //! enough; "target_arrived" after confirm_frames frames, "target_left" after
@@ -25,7 +30,8 @@ use bytes::Bytes;
 use recamera_detect::{Change, Filter, Presence, StreamBox, View};
 use serde::Serialize;
 use sophgo::venc::{Codec, Encoder};
-use sophgo::yolo::{Det, Yolo};
+use base64::Engine;
+use sophgo::yolo::{Det, Hints, Mask, Results, Task, Yolo};
 use sophgo::{Camera, ChannelConfig, Fit, PixelFormat, Pool, Reclaim, Sensor, Sys, VpssGroup};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -45,6 +51,12 @@ const VPSS_BLOCKS: u32 = 4;
 const FRAME_TIMEOUT_MS: i32 = 500;
 /// where a model given by name lives
 const MODELS_DIR: &str = "/data/models";
+/// ION the stream encoders still allocate after they are opened (the H.264
+/// reconstruction frames and work buffers at the first frame, 4.7 MB
+/// measured, plus a margin). Short of it, the Sophgo encoder's error path
+/// hangs the codec: a model that leaves less is unloaded instead.
+const ENCODER_ION_RESERVE: u64 = 5632 * 1024;
+const ION_DUMP: &str = "/sys/kernel/debug/ion/cvi_carveout_heap_dump";
 const REPORT_EVERY: Duration = Duration::from_secs(10);
 /// encoder channels (MaxVencChnNum = 3): 0 H.264 (RTSP), 1 JPEG
 const H264_CHN: i32 = 0;
@@ -189,26 +201,93 @@ struct DetBox {
     x2: f64,
     y2: f64,
     counts: bool,
+    /// pose: [x, y, visibility] per keypoint, stream coordinates
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kpts: Option<Vec<[f64; 3]>>,
+    /// segment: the mask, only while the page shows it
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mask: Option<MaskOut>,
+}
+
+fn r3(x: f32) -> f64 {
+    (x as f64 * 1000.0).round() / 1000.0
 }
 
 impl DetBox {
     fn new(d: &Det, b: &StreamBox, counts: bool) -> DetBox {
-        let r3 = |x: f32| (x as f64 * 1000.0).round() / 1000.0;
-        DetBox { class: d.class, score: r3(d.score), x1: r3(b.x1), y1: r3(b.y1), x2: r3(b.x2), y2: r3(b.y2), counts }
+        DetBox { class: d.class, score: r3(d.score), x1: r3(b.x1), y1: r3(b.y1), x2: r3(b.x2), y2: r3(b.y2), counts,
+                 kpts: None, mask: None }
     }
 }
 
-/// Class names from the model's metadata, <model>.json next to it
-/// ("classes": [...], as the models in /data/models come); empty if none.
-pub fn load_labels(model: &std::path::Path) -> Vec<String> {
-    let j = std::fs::read(model.with_extension("json")).ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
-    j.as_ref()
-        .and_then(|v| v.get("classes"))
-        .and_then(|c| c.as_array())
-        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-        .unwrap_or_default()
+/// A segment mask for the page: the rectangle it covers (stream
+/// coordinates), its size in cells and the cells as bits (rows from the most
+/// significant bit, each row on whole bytes), base64.
+#[derive(Serialize, Clone)]
+struct MaskOut {
+    x1: f64,
+    y1: f64,
+    x2: f64,
+    y2: f64,
+    w: u32,
+    h: u32,
+    bits: String,
 }
+
+impl MaskOut {
+    fn new(m: &Mask, view: &View) -> MaskOut {
+        let c = m.cell;
+        let b = view.to_stream(m.x as f32 * c, m.y as f32 * c, (m.x + m.w) as f32 * c, (m.y + m.h) as f32 * c);
+        MaskOut { x1: r3(b.x1), y1: r3(b.y1), x2: r3(b.x2), y2: r3(b.y2), w: m.w, h: m.h,
+                  bits: base64::engine::general_purpose::STANDARD.encode(&m.bits) }
+    }
+}
+
+/// The model's metadata, <model>.json next to it, as the models in
+/// /data/models come: "classes" (names), and optionally "task" (detect,
+/// pose, segment, classify), "kpt_shape" ([keypoints, 2|3]), "skeleton"
+/// (pairs of keypoint indices from 0, for drawing) and "kpt_names".
+#[derive(Default, Clone)]
+pub struct Meta {
+    pub classes: Vec<String>,
+    pub task: Option<String>,
+    pub kpt_shape: Option<(usize, usize)>,
+    pub skeleton: Option<Vec<[usize; 2]>>,
+    pub kpt_names: Option<Vec<String>>,
+}
+
+pub fn load_meta(model: &std::path::Path) -> Meta {
+    let Some(j) = std::fs::read(model.with_extension("json")).ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+    else {
+        return Meta::default();
+    };
+    let strings = |k: &str| j.get(k).and_then(|c| c.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>());
+    let nums = |v: &serde_json::Value| v.as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect::<Vec<_>>());
+    Meta {
+        classes: strings("classes").unwrap_or_default(),
+        task: j.get("task").and_then(|t| t.as_str()).map(String::from),
+        kpt_shape: j.get("kpt_shape").and_then(nums).filter(|v| v.len() == 2).map(|v| (v[0], v[1])),
+        skeleton: j.get("skeleton").and_then(|s| s.as_array()).map(|a| {
+            a.iter().filter_map(nums).filter(|p| p.len() == 2).map(|p| [p[0], p[1]]).collect()
+        }),
+        kpt_names: strings("kpt_names"),
+    }
+}
+
+/// Class names from the model's .json; empty if none.
+pub fn load_labels(model: &std::path::Path) -> Vec<String> {
+    load_meta(model).classes
+}
+
+/// The COCO person skeleton (pairs of the 17 keypoints, from 0), drawn when
+/// a 17-keypoint model does not give its own.
+const COCO_SKELETON: [[usize; 2]; 19] = [
+    [15, 13], [13, 11], [16, 14], [14, 12], [11, 12], [5, 11], [6, 12], [5, 6], [5, 7], [6, 8], [7, 9], [8, 10],
+    [1, 2], [0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 6],
+];
 
 #[derive(Serialize)]
 struct ChannelInfo {
@@ -244,8 +323,42 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
         Reclaim::Cleaned(n) => crate::warn!("media: cleaned {n} MPI objects left by a killed run"),
     }
 
+    // the model first: ch0 takes its input size
+    let meta = det.as_ref().map(|d| load_meta(&d.model)).unwrap_or_default();
+    let mut yolo = det.as_ref().and_then(|d| open_yolo(d, &meta, params, bus));
+    let (mw, mh) = yolo.as_ref().map(|y| y.input_size()).unwrap_or((YOLO_W, YOLO_H));
+    let task = yolo.as_ref().map(|y| y.task());
+    let k = yolo.as_ref().map(|y| y.keypoints()).unwrap_or(0);
+    // a .json listing another number of classes than the model has: the
+    // labels do not match the outputs (the factory classify .json has 1003
+    // names for 1000 outputs, shifted from ~410 on)
+    let warning = yolo.as_ref()
+        .filter(|y| !meta.classes.is_empty() && meta.classes.len() != y.classes())
+        .map(|y| format!("the .json lists {} classes, the model has {}: the labels are probably wrong",
+                         meta.classes.len(), y.classes()));
+    if let Some(w) = &warning {
+        crate::warn!("media: {w}");
+        bus.emit("media_warning", &serde_json::json!({ "warning": w }));
+    }
+    let model_info = match &yolo {
+        Some(y) => serde_json::json!({
+            "model": det.as_ref().and_then(|d| d.model.file_name()).map(|n| n.to_string_lossy()),
+            "warning": warning,
+            "task": y.task().name(),
+            "classes": meta.classes,
+            "input": [mw, mh],
+            "keypoints": k,
+            "kpt_names": meta.kpt_names,
+            "skeleton": meta.skeleton.clone().or_else(|| (k == 17).then(|| COCO_SKELETON.to_vec())),
+        }),
+        None => serde_json::json!({}),
+    };
+    if let Ok(mut m) = live.model.lock() {
+        *m = Arc::from(model_info.to_string());
+    }
+
     let pools = [
-        Pool { size: sophgo::buffer_size(YOLO_W, YOLO_H, PixelFormat::Rgb888), count: VPSS_BLOCKS },
+        Pool { size: sophgo::buffer_size(mw, mh, PixelFormat::Rgb888), count: VPSS_BLOCKS },
         Pool { size: sophgo::buffer_size(STREAM_W, STREAM_H, PixelFormat::Nv21), count: VPSS_BLOCKS },
     ];
     let sys = Sys::open(&pools, true).map_err(|e| e.to_string())?;
@@ -260,14 +373,17 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
         let ch = (w * 9 / 16) & !1;
         (0, (((h - ch) / 2) & !1) as i32, w, ch)
     });
+    // classify: the centre square of the frame, stretched (the Ultralytics
+    // preprocessing: shortest side, centre crop); the others: the whole
+    // frame letterboxed
+    let (fit0, crop0) = if task == Some(Task::Classify) {
+        let s = w.min(h) & !1;
+        (Fit::Stretch, Some(((((w - s) / 2) & !1) as i32, (((h - s) / 2) & !1) as i32, s, s)))
+    } else {
+        (Fit::Letterbox(LETTERBOX), None)
+    };
     let chans = [
-        ChannelConfig {
-            width: YOLO_W,
-            height: YOLO_H,
-            format: PixelFormat::Rgb888,
-            fit: Fit::Letterbox(LETTERBOX),
-            crop: None,
-        },
+        ChannelConfig { width: mw, height: mh, format: PixelFormat::Rgb888, fit: fit0, crop: crop0 },
         ChannelConfig { width: STREAM_W, height: STREAM_H, format: PixelFormat::Nv21, fit: Fit::Stretch, crop },
     ];
     let grp = VpssGroup::start(&cam, VPSS_GRP, &chans).map_err(|e| e.to_string())?;
@@ -280,10 +396,27 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
         .map_err(|e| crate::error!("media: h264 encoder: {e}; no RTSP"))
         .ok();
 
-    crate::info!("media: sensor {w}x{h}, ch0 {YOLO_W}x{YOLO_H} RGB, ch1 {STREAM_W}x{STREAM_H} NV21");
+    // the model and the pipeline are in: enough ION left for the encoders?
+    if yolo.is_some() && h264.is_some()
+        && let Some((used, total)) = ion_usage()
+        && total.saturating_sub(used) < ENCODER_ION_RESERVE
+    {
+        let name = det.as_ref().map(|d| d.model.display().to_string()).unwrap_or_default();
+        let e = format!("{name}: with it {} of {} MB of ION are in use, and the stream needs {} MB more; \
+                         detection off (a smaller model, or a larger ION carveout)",
+                        used >> 20, total >> 20, ENCODER_ION_RESERVE >> 20);
+        crate::error!("media: {e}");
+        bus.emit("media_error", &serde_json::json!({ "error": e }));
+        yolo = None;
+        if let Ok(mut m) = live.model.lock() {
+            *m = Arc::from(serde_json::json!({ "error": e }).to_string());
+        }
+    }
+
+    crate::info!("media: sensor {w}x{h}, ch0 {mw}x{mh} RGB, ch1 {STREAM_W}x{STREAM_H} NV21");
     bus.emit("media_started", &serde_json::json!({
         "sensor": format!("{w}x{h}"),
-        "ch0": ChannelInfo { width: YOLO_W, height: YOLO_H, format: "rgb888" },
+        "ch0": ChannelInfo { width: mw, height: mh, format: "rgb888" },
         "ch1": ChannelInfo { width: STREAM_W, height: STREAM_H, format: "nv21" },
         "stream_crop": crop,
     }));
@@ -291,12 +424,12 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
     let counters = Counters::default();
     thread::scope(|s| {
         let (grp, counters) = (&grp, &counters);
-        // ch0: YOLO on the NPU, straight from the frame (no copy)
-        let mut yolo = det.as_ref().and_then(|d| open_yolo(d, params, bus));
-        let labels = det.as_ref().map(|d| load_labels(&d.model)).unwrap_or_default();
-        let view = View::new((w, h), (YOLO_W, YOLO_H), crop);
+        // ch0: the model on the NPU, straight from the frame (no copy)
+        let labels = meta.classes;
+        let view = View::new((w, h), (mw, mh), crop);
+        let yolo = &mut yolo;
         let ch0 = thread::Builder::new().name("media-yolo".into()).spawn_scoped(s, move || {
-            let mut dets: Vec<Det> = Vec::with_capacity(sophgo::yolo::MAX_DETECTIONS);
+            let mut res = Results::default();
             let mut boxes: Vec<DetBox> = Vec::with_capacity(sophgo::yolo::MAX_DETECTIONS);
             let mut p = params.lock().map(|p| *p).unwrap_or_else(|e| *e.into_inner());
             let mut presence = Presence::new(p.confirm, p.leave_after);
@@ -323,24 +456,47 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
                 }
 
                 let t = Instant::now();
-                if let Err(e) = y.detect_phys(f.phys(0), Some(p.target), p.threshold, p.nms, &mut dets) {
+                if let Err(e) = y.infer_phys(f.phys(0)) {
                     crate::error!("media: yolo: {e}; detection off");
-                    yolo = None;
+                    *yolo = None;
                     continue;
                 }
                 drop(f);
+                // masks cost CPU: only while the page shows them
+                let shown = live.dets.receiver_count() > 0;
+                y.decode(Some(p.target), p.threshold, p.nms, shown, &mut res);
                 counters.yolo_us.fetch_add(t.elapsed().as_micros() as u64, Ordering::Relaxed);
                 counters.yolo_frames.fetch_add(1, Ordering::Relaxed);
 
                 boxes.clear();
                 let mut best: Option<usize> = None;
-                for d in &dets {
+                if task == Some(Task::Classify) {
+                    // the target class above the threshold: the whole picture
+                    if let Some(&(c, s)) = res.top.iter().find(|&&(c, _)| c == p.target)
+                        && s >= p.threshold
+                    {
+                        let whole = Det { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0, score: s, class: c, anchor: 0 };
+                        boxes.push(DetBox::new(&whole, &StreamBox { x1: 0.0, y1: 0.0, x2: 1.0, y2: 1.0 }, true));
+                        best = Some(0);
+                    }
+                }
+                for (n, d) in res.dets.iter().enumerate() {
                     let b = view.to_stream(d.x1, d.y1, d.x2, d.y2);
                     let counts = p.filter.accepts(&b);
                     if counts && best.is_none_or(|i| boxes[i].score < d.score as f64) {
                         best = Some(boxes.len());
                     }
-                    boxes.push(DetBox::new(d, &b, counts));
+                    let mut db = DetBox::new(d, &b, counts);
+                    if k > 0 && res.kpts.len() >= (n + 1) * k {
+                        db.kpts = Some(res.kpts[n * k..(n + 1) * k].iter().map(|q| {
+                            let s = view.to_stream(q[0], q[1], q[0], q[1]);
+                            [r3(s.x1), r3(s.y1), r3(q[2])]
+                        }).collect());
+                    }
+                    if let Some(Some(m)) = res.masks.get(n) {
+                        db.mask = Some(MaskOut::new(m, &view));
+                    }
+                    boxes.push(db);
                 }
                 if best.is_some() {
                     counters.target_frames.fetch_add(1, Ordering::Relaxed);
@@ -349,13 +505,17 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
                     Some(Change::Arrived) => {
                         let b = &boxes[best.unwrap_or(0)];
                         crate::info!("media: target {} arrived (score {})", label(p.target), b.score);
-                        bus.emit("target_arrived", &serde_json::json!({
+                        let mut ev = serde_json::json!({
                             "class": p.target,
                             "label": label(p.target),
                             "score": b.score,
                             "box": [b.x1, b.y1, b.x2, b.y2],
                             "count": boxes.iter().filter(|b| b.counts).count(),
-                        }));
+                        });
+                        if let (Some(kp), Some(o)) = (&b.kpts, ev.as_object_mut()) {
+                            o.insert("keypoints".into(), serde_json::json!(kp));
+                        }
+                        bus.emit("target_arrived", &ev);
                     }
                     Some(Change::Left { stayed }) => {
                         let s = (stayed.as_secs_f64() * 10.0).round() / 10.0;
@@ -367,14 +527,21 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
                     None => {}
                 }
                 if let Ok(mut l) = counters.last.lock() {
-                    l.clone_from(&boxes);
+                    // the 10 s report carries the boxes, not the masks
+                    l.clear();
+                    l.extend(boxes.iter().map(|b| DetBox { mask: None, ..b.clone() }));
                 }
                 // the boxes of every frame, for the page (only if it listens)
-                if live.dets.receiver_count() > 0 {
+                if shown {
+                    let top: Vec<_> = res.top.iter().map(|&(c, s)| serde_json::json!({
+                        "class": c, "label": label(c), "score": r3(s),
+                    })).collect();
                     let j = serde_json::json!({
+                        "task": task.map(|t| t.name()),
                         "target": label(p.target),
                         "present": presence.present(),
                         "boxes": boxes,
+                        "top": top,
                     });
                     live.dets.send_replace(Arc::from(j.to_string()));
                 }
@@ -491,33 +658,51 @@ fn run(sensor: Sensor, det: Option<Detection>, quality: u32, h264: Codec, params
     });
 
     crate::info!("media: stopping");
-    // the model (in the ch0 thread) is gone; grp, cam and sys drop here, in
-    // that order
+    // the model goes first, then grp, cam and sys (in that order, as they
+    // drop at the end of this function)
+    drop(yolo);
     Ok(())
+}
+
+/// ION in use and in total, bytes (the carveout heap's debugfs).
+fn ion_usage() -> Option<(u64, u64)> {
+    let read = |f: &str| std::fs::read_to_string(format!("{ION_DUMP}/{f}")).ok()?.trim().parse::<u64>().ok();
+    if read("total_mem").is_none() {
+        // debugfs not mounted yet
+        let _ = std::process::Command::new("/bin/mount").args(["-t", "debugfs", "none", "/sys/kernel/debug"]).status();
+    }
+    Some((read("alloc_mem")?, read("total_mem")?))
 }
 
 /// Load the model for ch0; None (detection off, the stream goes on) when it
 /// cannot be used.
-fn open_yolo(d: &Detection, params: &Mutex<DetParams>, bus: &Bus) -> Option<Yolo> {
+fn open_yolo(d: &Detection, meta: &Meta, params: &Mutex<DetParams>, bus: &Bus) -> Option<Yolo> {
     let fail = |e: String| {
         crate::error!("media: {e}; detection off");
         bus.emit("media_error", &serde_json::json!({ "error": e }));
         None
     };
-    let y = match Yolo::open(&d.model) {
+    let hints = Hints {
+        classes: (!meta.classes.is_empty()).then_some(meta.classes.len()),
+        task: meta.task.as_deref(),
+        kpt_shape: meta.kpt_shape,
+    };
+    let y = match Yolo::open(&d.model, hints) {
         Ok(y) => y,
         Err(e) => return fail(e),
     };
-    if y.input_size() != (YOLO_W, YOLO_H) {
-        let (w, h) = y.input_size();
-        return fail(format!("{}: input {w}x{h}, ch0 gives {YOLO_W}x{YOLO_H}", d.model.display()));
+    let (w, h) = y.input_size();
+    if w == 0 || h == 0 || w > 1280 || h > 1280 || w % 2 != 0 || h % 2 != 0 {
+        return fail(format!("{}: input {w}x{h}: even sizes up to 1280 only", d.model.display()));
     }
     let p = params.lock().map(|p| *p).unwrap_or_else(|e| *e.into_inner());
     if p.target as usize >= y.classes() {
         return fail(format!("detection.target_class {}: the model has {} classes", p.target, y.classes()));
     }
-    crate::info!("media: yolo {} ({} classes), target {} >= {}", d.model.display(), y.classes(), p.target,
-                 p.threshold);
+    crate::info!("media: yolo {} ({}, {} classes{}, input {w}x{h}), target {} >= {}", d.model.display(),
+                 y.task().name(), y.classes(),
+                 if y.keypoints() > 0 { format!(", {} keypoints", y.keypoints()) } else { String::new() },
+                 p.target, p.threshold);
     Some(y)
 }
 

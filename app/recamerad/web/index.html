@@ -108,8 +108,11 @@
           <h3>Models in /data/models</h3>
           <ul id="models" class="models"></ul>
           <h3>Add a model</h3>
-          <p class="muted">A YOLOv8/YOLO11 detection model converted for the cv181x NPU (.cvimodel,
-            640&times;640 RGB input), and its .json with the class names ("classes": [...]).</p>
+          <p class="muted">A YOLOv8/YOLO11 model converted for the cv181x NPU (.cvimodel, RGB input),
+            and its .json with the class names (<code>"classes": [...]</code>). Detection, pose, segment
+            and classify are told apart by the model's outputs; for pose the .json may add
+            <code>"kpt_shape"</code>, <code>"skeleton"</code> (pairs of keypoint indices from 0) and
+            <code>"kpt_names"</code> to draw it. Classify models look at the centre square of the picture.</p>
           <input type="file" id="model-file" accept=".cvimodel,.json" multiple>
           <p id="model-state" class="muted"></p>
         </div>

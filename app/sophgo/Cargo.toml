@@ -9,3 +9,4 @@ rust-version.workspace = true
 
 [dependencies]
 sophgo-sys = { path = "../sophgo-sys" }
+recamera-detect = { path = "../recamera-detect" }

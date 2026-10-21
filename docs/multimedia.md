@@ -376,9 +376,21 @@ pool (9.1 MB) disappears**.
 | **online, 4 blocks** | **28.4 MB** | **29.9 fps** | **24.1 fps** |
 
 The bottleneck was the number of VPSS blocks, not the CPU (50 % idle under load). NPU work
-areas: 2.6 MB (detection), 2.9 MB (pose), 6.4 MB (segment). **ION is 36 MiB**
-(`size = <0x02400000>`), leaving ~211 MB to Linux. Validated: stream at 30.0 fps with YOLO
-at 24.3 fps, peak 28.4 of 36 MB, ION back to 0 after every mode.
+areas: 2.6 MB (detection), 2.9 MB (pose), 6.4 MB (segment). ION was first sized at 36 MiB
+for detection (stream at 30.0 fps with YOLO at 24.3 fps, peak 28.4 MB).
+
+**ION is 48 MiB** (`size = <0x03000000>`) since the application runs any model type: the
+segment model's float outputs add ~7 MB (`[1,116,8400]` + `[1,32,160,160]` in f32), and
+with it the pipeline alone took 34.6 of 36 MB. Measured peaks with RTSP and MJPEG open:
+detection 25.8 MB, pose 27.3 MB, segment 36.0 MB. Linux keeps ~164 MB available.
+
+**When ION runs out under the H.264 encoder, the codec hangs** (21/10/2026): the encoder
+allocates its reconstruction frames at the first frame (`fail to allocate recon buffer`,
+`CVI_VENC_SendFrame ... -11`), and after that failure its threads stay in the driver
+(`cvi_vc_drv_venc_ioctl`, the next user in `EnterVcodecLock`): the pipeline cannot be torn
+down and the process becomes a zombie until a reboot. The daemon now checks the free ION
+after loading the model and opening the encoders, and unloads a model that leaves less than
+~5.5 MB.
 
 ## 9. Added along the way
 

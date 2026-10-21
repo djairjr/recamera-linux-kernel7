@@ -7,6 +7,7 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 let config = null;
 let dets = { boxes: [] };
+let modelInfo = {};  // the running model: task, classes, keypoints, skeleton (/api/model)
 let live = null;
 
 async function api(path, body) {
@@ -183,7 +184,6 @@ function fmtSize(b) { return b > 1 << 20 ? (b / (1 << 20)).toFixed(1) + " MB" : 
 
 // the detector decodes YOLOv8/11 detection outputs: classify, pose and
 // segment models (same family, other heads) cannot be used
-const isDetection = (m) => !/classif|pose|segment/i.test((m.title || "") + " " + m.name);
 async function loadModels() {
   const list = await api("/api/models").catch(() => []);
   const ul = $("#models");
@@ -192,7 +192,8 @@ async function loadModels() {
     const li = document.createElement("li");
     li.classList.toggle("active", m.active);
     const name = document.createElement("span");
-    name.textContent = (m.title || m.name) + (m.classes ? ` · ${m.classes} classes` : "") + ` · ${fmtSize(m.size)}`;
+    name.textContent = (m.title || m.name) + ` · ${m.task}` + (m.classes ? ` · ${m.classes} classes` : "") +
+      ` · ${fmtSize(m.size)}`;
     name.title = m.name;
     li.append(name);
     if (m.active) {
@@ -201,15 +202,29 @@ async function loadModels() {
       const use = document.createElement("button");
       use.type = "button";
       use.textContent = "Use";
-      if (!isDetection(m)) {
-        use.disabled = true;
-        use.title = "Not a detection model: the detector decodes YOLOv8/11 detection outputs only";
-      }
       use.onclick = async () => {
+        const st = $("#model-state");
         config.detection.model = m.name;
         config.detection.target_class = 0;
-        await save();
+        st.textContent = `Loading ${m.name}…`;
+        try {
+          await api("/api/config", config);
+        } catch (err) { st.textContent = `${m.name}: ${err.message}`; return; }
         await reloadConfig();
+        // the pipeline restarts with the model: wait for it, then say what it is
+        // (until then /api/model and /api/labels still describe the old one)
+        for (let i = 0; i < 15; i++) {
+          await new Promise((r) => setTimeout(r, 700));
+          await loadModelInfo();
+          if (modelInfo.model === m.name || modelInfo.error) break;
+        }
+        await loadLabels();
+        st.textContent = modelInfo.model === m.name
+          ? `${m.name}: ${modelInfo.task}, ${modelInfo.classes.length} classes` +
+            (modelInfo.keypoints ? `, ${modelInfo.keypoints} keypoints` : "") +
+            `, input ${modelInfo.input[0]}×${modelInfo.input[1]}` +
+            (modelInfo.warning ? `. Warning: ${modelInfo.warning}` : "")
+          : `${m.name}: not loaded` + (modelInfo.error ? `: ${modelInfo.error}` : " (see the System log)");
       };
       const del = document.createElement("button");
       del.type = "button";
@@ -237,6 +252,10 @@ $("#model-file").addEventListener("change", async (e) => {
   e.target.value = "";
   loadModels();
 });
+
+async function loadModelInfo() {
+  modelInfo = await api("/api/model").catch(() => ({}));
+}
 
 async function loadLabels() {
   const labels = await api("/api/labels").catch(() => []);
@@ -269,7 +288,23 @@ function draw() {
     ctx.setLineDash([]);
   }
   ctx.font = "13px system-ui, sans-serif";
+  // classify: the best classes over the picture
+  if (dets.task === "classify" && dets.top) {
+    let y = 8;
+    for (const t of dets.top) {
+      const s = `${t.label} ${Math.round(t.score * 100)}%`;
+      const tw = ctx.measureText(s).width + 10;
+      ctx.fillStyle = t.label === dets.target && dets.present ? "#22c55e" : "rgba(0, 0, 0, 0.6)";
+      ctx.fillRect(8, y, tw, 20);
+      ctx.fillStyle = "#fff";
+      ctx.fillText(s, 13, y + 15);
+      y += 24;
+    }
+  }
   for (const b of dets.boxes || []) {
+    if (b.mask) drawMask(b.mask, w, h, b.counts);
+    if (b.kpts) drawPose(b.kpts, w, h);
+    if (dets.task === "classify") continue;
     const x = b.x1 * w, y = b.y1 * h, bw = (b.x2 - b.x1) * w, bh = (b.y2 - b.y1) * h;
     ctx.strokeStyle = b.counts ? "#22c55e" : "rgba(200, 200, 200, 0.8)";
     ctx.lineWidth = b.counts ? 3 : 1.5;
@@ -288,6 +323,51 @@ function draw() {
   }
 }
 new ResizeObserver(draw).observe(canvas);
+
+// segment: the mask bits (rows on whole bytes, most significant bit first)
+// over the rectangle they cover
+const maskCanvas = document.createElement("canvas");
+function drawMask(m, w, h, counts) {
+  const bits = atob(m.bits), stride = Math.ceil(m.w / 8);
+  maskCanvas.width = m.w; maskCanvas.height = m.h;
+  const mc = maskCanvas.getContext("2d"), img = mc.createImageData(m.w, m.h);
+  const [r, g, bl] = counts ? [34, 197, 94] : [200, 200, 200];
+  for (let y = 0; y < m.h; y++) {
+    for (let x = 0; x < m.w; x++) {
+      if (bits.charCodeAt(y * stride + (x >> 3)) & (0x80 >> (x & 7))) {
+        const i = (y * m.w + x) * 4;
+        img.data[i] = r; img.data[i + 1] = g; img.data[i + 2] = bl; img.data[i + 3] = 110;
+      }
+    }
+  }
+  mc.putImageData(img, 0, 0);
+  ctx.imageSmoothingEnabled = true;
+  ctx.drawImage(maskCanvas, m.x1 * w, m.y1 * h, (m.x2 - m.x1) * w, (m.y2 - m.y1) * h);
+}
+
+// pose: the skeleton of the model (its .json, or COCO for 17 keypoints),
+// then the visible keypoints
+function drawPose(k, w, h) {
+  const seen = (p) => p && p[2] >= 0.5;
+  ctx.strokeStyle = "#38bdf8";
+  ctx.lineWidth = 2;
+  for (const [a, b] of modelInfo.skeleton || []) {
+    if (!seen(k[a]) || !seen(k[b])) continue;
+    ctx.beginPath();
+    ctx.moveTo(k[a][0] * w, k[a][1] * h);
+    ctx.lineTo(k[b][0] * w, k[b][1] * h);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "#f97316";
+  k.forEach((p, i) => {
+    if (!seen(p)) return;
+    ctx.beginPath();
+    ctx.arc(p[0] * w, p[1] * h, 3.5, 0, 2 * Math.PI);
+    ctx.fill();
+    const n = modelInfo.kpt_names && modelInfo.kpt_names[i];
+    if (n && w > 700) { ctx.fillStyle = "#fff"; ctx.fillText(n, p[0] * w + 5, p[1] * h - 4); ctx.fillStyle = "#f97316"; }
+  });
+}
 
 function setDrawing(on) {
   drawing = on;
@@ -707,6 +787,7 @@ async function reloadConfig() {
   config = await api("/api/config");
   showControls();
   await loadLabels();
+  await loadModelInfo();
   loadModels();
   draw();
 }

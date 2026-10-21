@@ -63,8 +63,8 @@ appears is emulated by the firmware anyway.
 | Logging | syslog (stderr with `-f`); `-v` for debug |
 | Events | JSON lines with `type` and `ts`, on stdout (`--events`) and the Unix socket `/run/recamerad/events.sock`; `recamera-events` prints them |
 | Telemetry | SoC temperature, load, memory, daemon RSS, every `telemetry.interval_s` |
-| Detection | YOLOv8/YOLO11 detection `.cvimodel` on the NPU, ~25 fps; DFL decoding + sigmoid + NMS in Rust; the target class, threshold, NMS, minimum area, area of interest, frames to confirm and seconds to leave change live |
-| Events of the target | `target_arrived` (`class`, `label`, `score`, `box`, `count`) after `confirm_frames` frames in a row; `target_left` (`stayed_s`) after `leave_after_s` without it |
+| Models | any YOLOv8/YOLO11 `.cvimodel` on the NPU — **detect, pose, segment or classify**, told apart by its outputs (§3b); decoding in Rust; the target class, threshold, NMS, minimum area, area of interest, frames to confirm and seconds to leave change live |
+| Events of the target | `target_arrived` (`class`, `label`, `score`, `box`, `count`, and `keypoints` with a pose model) after `confirm_frames` frames in a row; `target_left` (`stayed_s`) after `leave_after_s` without it |
 | Area of interest | one rectangle drawn on the page; the target counts when its base (bottom centre of the box) is inside it |
 | Web page | port 80, login with the system account; sections Camera, YOLO, Network, MQTT, LLM, System, Terminal (§4) |
 | MJPEG | `/stream.mjpg`, `/snapshot.jpg`; hardware JPEG, only encoding while someone watches |
@@ -91,10 +91,38 @@ appears is emulated by the firmware anyway.
 | `telemetry` | `interval_s` (10) |
 | `events` | `socket` (`/run/recamerad/events.sock`) |
 
-Models live in `/data/models`: a `.cvimodel` for the cv181x NPU (640×640 RGB input) and a
-`.json` next to it with `"classes": [...]`. Ultralytics weights are AGPL-3.0, so none ship
-in the image or the repository; `scripts/models.sh` extracts the four factory YOLO11n
-models from the official Seeed image, and the YOLO page uploads your own.
+Models live in `/data/models`: a `.cvimodel` for the cv181x NPU (RGB input) and a `.json`
+next to it with `"classes": [...]`. Ultralytics weights are AGPL-3.0, so none ship in the
+image or the repository; `scripts/models.sh` extracts the four factory YOLO11n models from
+the official Seeed image, and the YOLO page uploads your own.
+
+## 3b. Model types
+
+The daemon reads the task from the shapes of the model's outputs
+(`recamera_detect::decode::layout`, tested on the host):
+
+| Outputs | Task | Notes |
+|---|---|---|
+| per stride 8/16/32 a `[1,64,h,w]` box tensor + a `[1,C,h,w]` class tensor, INT8 | detect | the Sophgo export (the factory detection model): raw DFL, decoded here |
+| one `[1, 4 + nc, N]` | detect | the Ultralytics export, already decoded (box centre/size in pixels, class scores) |
+| one `[1, 4 + nc + K×3 (or ×2), N]` | pose | **K is deduced** (17 for people, 24 for the Ultralytics dog-pose dataset, any other) |
+| `[1, 4 + nc + 32, N]` + `[1, 32, h, w]` prototypes | segment | masks computed only while the page shows them (CPU work) |
+| `[1, nc]` | classify | its own input size (224×224 for YOLO11n-cls) from the centre square of the picture; "present" = the target class at or above the threshold |
+
+Float or INT8 outputs both work. Optional `.json` fields, which win over the deduction:
+`"task"` (`detect`, `pose`, `segment`, `classify`), `"kpt_shape"` (`[K, 2|3]`),
+`"skeleton"` (pairs of keypoint indices from 0, for drawing; a 17-keypoint model without one
+gets the COCO person skeleton) and `"kpt_names"`. A `.json` that lists another number of
+classes than the model has is reported (log, events, YOLO page): the labels would be wrong.
+The factory classify `.json` is such a case (1003 names for 1000 outputs).
+
+Measured with RTSP and MJPEG open: detect 23.6 fps (ION peak 25.8 MB), pose 16.7 fps
+(27.3 MB), segment 12 fps (36.0 MB), classify 30 fps.
+
+**ION budget:** a model that leaves less than ~5.5 MB of ION free after the pipeline and the
+encoders are open is unloaded at start (the stream goes on, the page says why): the H.264
+encoder allocates its reconstruction frames at the first frame, and when that fails the
+Sophgo encoder's error path hangs the codec.
 
 ## 4. The web page and its API
 
@@ -110,7 +138,8 @@ The page (`recamerad/web/`, plain HTML/JS/CSS, no framework) is built into the b
   counts, grey = outside the area) from Server-Sent Events (`/live`), the area of interest,
   detection controls, picture controls (brightness, contrast, saturation, hue, sharpness,
   mirror, flip), white LED, stream rate and quality, the LLM switch, recent events.
-- **YOLO:** the models in `/data/models` (title and classes from the `.json`), Use, Delete
+- **YOLO:** the models in `/data/models` (title, task and classes), Use (the pipeline
+  restarts with it in about a second; the page then reports what was loaded), Delete
   (never the active one), upload (`PUT /api/models/<name>`, streamed to disk, 32 MB limit,
   checked: `CviModel` header, valid `.json`, plain file names).
 - **Network:** Wi-Fi state, addresses, saved networks (forget), scan and connect, over the
@@ -129,7 +158,7 @@ The page (`recamerad/web/`, plain HTML/JS/CSS, no framework) is built into the b
 |---|---|
 | `/api/login`, `/api/logout`, `/api/session` | POST, POST, GET |
 | `/api/config` | GET, POST (validated, saved, applied) |
-| `/api/status`, `/api/labels`, `/api/logs`, `/api/crashes[/<dir>/<file>]`, `/api/timezones` | GET |
+| `/api/status`, `/api/labels`, `/api/model`, `/api/logs`, `/api/crashes[/<dir>/<file>]`, `/api/timezones` | GET |
 | `/api/models`, `/api/models/<name>` | GET; PUT, DELETE |
 | `/api/password`, `/api/reboot` | POST |
 | `/api/network`, `/api/network/scan`, `/api/network/connect`, `/api/network/forget` | GET, POST… |

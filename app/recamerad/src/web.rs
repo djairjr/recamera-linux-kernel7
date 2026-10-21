@@ -4,7 +4,8 @@
 //! - `/`, `/app.js`, `/app.css`: the page, built into the binary (web/)
 //! - `POST /api/login`: the system account (/etc/shadow), as the Seeed page
 //!   did; a session cookie (HttpOnly) for everything else
-//! - `GET|POST /api/config`, `GET /api/status`, `GET /api/labels`
+//! - `GET|POST /api/config`, `GET /api/status`, `GET /api/labels`,
+//!   `GET /api/model` (task, classes, keypoints and skeleton of the running model)
 //! - `/stream.mjpg` (multipart JPEG), `/snapshot.jpg`
 //! - `/live`: Server-Sent Events, the boxes of every frame ("dets") and the
 //!   daemon events
@@ -187,6 +188,13 @@ async fn handle(w: Arc<Web>, req: Request<Incoming>, local: IpAddr) -> Result<Re
                 }
                 (&Method::POST, "/api/config") => set_config(&w, req).await,
                 (&Method::GET, "/api/status") => json(StatusCode::OK, &status(&w)),
+                (&Method::GET, "/api/model") => {
+                    let m = w.live.model.lock().map(|m| m.clone()).unwrap_or_else(|_| Arc::from("{}"));
+                    let mut r = Response::new(full(m.to_string()));
+                    r.headers_mut().insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    r.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+                    r
+                }
                 (&Method::GET, "/api/labels") => {
                     let m = media::model_path(&w.config.borrow().detection.model);
                     json(StatusCode::OK, &media::load_labels(&m))

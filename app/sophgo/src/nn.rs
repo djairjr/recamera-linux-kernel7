@@ -124,6 +124,13 @@ impl Tensor<'_> {
         unsafe { ffi::CVI_NN_TensorSize(self.t) }
     }
 
+    /// The data as f32 (a float output), valid after forward.
+    pub fn data_f32(&self) -> &[f32] {
+        // SAFETY: the runtime's buffer of this tensor, size bytes, aligned
+        // for its element type
+        unsafe { std::slice::from_raw_parts(ffi::CVI_NN_TensorPtr(self.t) as *const f32, self.size() / 4) }
+    }
+
     /// The data as INT8 (the outputs of an int8 model), valid after forward.
     pub fn data_i8(&self) -> &[i8] {
         // SAFETY: the runtime's buffer of this tensor, size bytes

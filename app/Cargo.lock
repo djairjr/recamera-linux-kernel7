@@ -596,6 +596,7 @@ name = "recamera-yolo"
 version = "0.1.0"
 dependencies = [
  "lexopt",
+ "serde_json",
  "sophgo",
 ]
 
@@ -811,6 +812,7 @@ dependencies = [
 name = "sophgo"
 version = "0.1.0"
 dependencies = [
+ "recamera-detect",
  "sophgo-sys",
 ]
 

@@ -6,9 +6,13 @@
 //!   16:9 picture the web page shows), where the ROI is drawn;
 //! - [`Roi`] and [`Filter`]: which detections count (the paws, the bottom
 //!   centre of the box, inside the ROI; minimum box area);
+//! - [`decode`]: the YOLO outputs (detection, pose, segment, classify) to
+//!   boxes, keypoints, masks and classes;
 //! - [`Presence`]: target arrival after N consecutive frames, departure
 //!   after some seconds without it (owner's decision, 20/10/2026: only these
 //!   two events, one rectangle as the area of interest).
+
+pub mod decode;
 
 use serde::{Deserialize, Serialize};
 use std::time::{Duration, Instant};

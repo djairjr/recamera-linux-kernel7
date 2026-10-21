@@ -1,11 +1,11 @@
-//! recamera-yolo -- run the YOLO detection model on the NPU over saved frames
+//! recamera-yolo -- run a YOLO model (detect, pose, segment, classify) on the NPU over saved frames
 //! (raw RGB packed at the model input size, e.g. the <out>.rgb of
 //! recamera-vicap yolo), without the camera. Prints the detections in the
 //! .det format of recamera-vicap ("class score x1 y1 x2 y2", model input
 //! pixels), so the Rust decoding can be compared with the C one, and the
 //! inference time.
 
-use sophgo::yolo::{Det, Yolo};
+use sophgo::yolo::{Hints, Results, Task, Yolo};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use std::time::Instant;
 const HELP: &str = "\
 Usage: recamera-yolo [options] FRAME.rgb...
 
-Run the YOLO detection model on saved frames (raw RGB packed, the model
+Run a YOLO model (detect, pose, segment, classify) on saved frames (raw RGB packed, the model
 input size: 640x640x3 = 1228800 bytes, as recamera-vicap yolo saves them)
 and print the detections, one per line: class score x1 y1 x2 y2 (model
 input pixels).
@@ -97,7 +97,18 @@ fn main() -> ExitCode {
         }
     };
     let t0 = Instant::now();
-    let mut yolo = match Yolo::open(&a.model) {
+    // what the model's .json says (classes, task, kpt_shape), as recamerad reads it
+    let meta = std::fs::read(a.model.with_extension("json")).ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .unwrap_or_default();
+    let kpt: Vec<usize> = meta.get("kpt_shape").and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect()).unwrap_or_default();
+    let hints = Hints {
+        classes: meta.get("classes").and_then(|c| c.as_array()).map(|a| a.len()),
+        task: meta.get("task").and_then(|t| t.as_str()),
+        kpt_shape: (kpt.len() == 2).then(|| (kpt[0], kpt[1])),
+    };
+    let mut yolo = match Yolo::open(&a.model, hints) {
         Ok(y) => y,
         Err(e) => {
             eprintln!("recamera-yolo: {e}");
@@ -105,15 +116,15 @@ fn main() -> ExitCode {
         }
     };
     let (w, h) = yolo.input_size();
-    eprintln!("{}: input {w}x{h} RGB, {} classes, loaded in {} ms", a.model.display(), yolo.classes(),
-              t0.elapsed().as_millis());
+    eprintln!("{}: {}, input {w}x{h} RGB, {} classes, {} keypoints, loaded in {} ms", a.model.display(),
+              yolo.task().name(), yolo.classes(), yolo.keypoints(), t0.elapsed().as_millis());
     if let Some(c) = a.class.filter(|&c| c as usize >= yolo.classes()) {
         eprintln!("recamera-yolo: class {c}: the model has {} classes", yolo.classes());
         return ExitCode::from(2);
     }
 
     let mut ok = true;
-    let mut dets: Vec<Det> = Vec::with_capacity(sophgo::yolo::MAX_DETECTIONS);
+    let mut res = Results::default();
     for f in &a.frames {
         let rgb = match std::fs::read(f) {
             Ok(b) => b,
@@ -126,7 +137,7 @@ fn main() -> ExitCode {
         let t = Instant::now();
         let mut r = Ok(());
         for _ in 0..a.repeat {
-            r = yolo.detect_rgb(&rgb, a.class, a.thr, a.nms, &mut dets);
+            r = yolo.detect_rgb(&rgb, a.class, a.thr, a.nms, &mut res);
             if r.is_err() {
                 break;
             }
@@ -137,9 +148,21 @@ fn main() -> ExitCode {
             continue;
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0 / a.repeat as f64;
-        println!("# {}: {} detection(s), {ms:.1} ms (copy + inference + decoding)", f.display(), dets.len());
-        for d in &dets {
-            println!("{} {:.3} {:.1} {:.1} {:.1} {:.1}", d.class, d.score, d.x1, d.y1, d.x2, d.y2);
+        if yolo.task() == Task::Classify {
+            println!("# {}: {ms:.1} ms (copy + inference + decoding)", f.display());
+            for (c, p) in &res.top {
+                println!("{c} {p:.3}");
+            }
+            continue;
+        }
+        println!("# {}: {} detection(s), {ms:.1} ms (copy + inference + decoding)", f.display(), res.dets.len());
+        for (n, d) in res.dets.iter().enumerate() {
+            print!("{} {:.3} {:.1} {:.1} {:.1} {:.1}", d.class, d.score, d.x1, d.y1, d.x2, d.y2);
+            // pose: the keypoints after the box, x y visibility each
+            for q in res.kpts.iter().skip(n * res.k).take(res.k) {
+                print!(" {:.1} {:.1} {:.2}", q[0], q[1], q[2]);
+            }
+            println!();
         }
     }
     if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }

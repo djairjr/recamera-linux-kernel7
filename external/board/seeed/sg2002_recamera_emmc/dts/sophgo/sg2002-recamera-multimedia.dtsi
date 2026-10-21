@@ -25,11 +25,14 @@
  * cv181x_base.dtsi cvitek-ion node. The region is allocated by size at boot
  * (no fixed address, no compatible: the vendor "ion-region" early hook cannot
  * live in a module, which looks the region up instead) and stays in the linear
- * map, as on the vendor kernel. Size 36 MiB, set by measurement in F7 step
- * 10 (owner's choice, 19/10/2026): the application load (VI->VPSS online, 4
- * blocks per VPSS output, YOLO11n on the NPU, H.264 + JPEG at 30 fps) peaks at
- * 28.4 MB; 36 MiB leaves room for a larger model (YOLO11n segment needs ~3.8
- * MB more). The vendor's 60 MiB is sized for every use case.
+ * map, as on the vendor kernel. Size 48 MiB, by measurement: the pipeline
+ * (VI->VPSS online, 4 blocks per VPSS output) + H.264 + JPEG with the model
+ * peaks at ~27.7 MB with YOLO11n detection, ~32 MB with pose and ~39.3 MB
+ * with segment (its float outputs alone are ~7 MB); 36 MiB (F7 step 10) did
+ * not fit segment, and the H.264 encoder hung in its error path when ION
+ * ran out (21/10/2026). 48 MiB leaves ~9 MB for larger models; recamerad
+ * also refuses a model that leaves the encoders too little. The vendor's 60
+ * MiB is sized for every use case.
  */
 
 / {
@@ -39,7 +42,7 @@
 		ranges;
 
 		ion_reserved: ion {
-			size = <0x02400000>;		/* 36 MiB */
+			size = <0x03000000>;		/* 48 MiB */
 			alignment = <0x00100000>;
 		};
 	};

@@ -35,13 +35,13 @@ Nano). The **pitfalls** section is the part most worth reading.
 | SoC temperature, thermal shutdown below the DRAM limit, watchdog, reboot/power off, crash log across resets (pstore) | ✅ |
 | White LED with PWM brightness | ✅ |
 | Camera (OV5647): MIPI, ISP with 3A, VPSS, hardware JPEG and H.264 | ✅ 30 fps |
-| NPU (YOLOv8/YOLO11 `.cvimodel`) | ✅ ~25 fps at 1280×960 with the stream running |
+| NPU: any YOLOv8/YOLO11 `.cvimodel` — detect, pose (any keypoint count), segment, classify | ✅ detect ~25 fps, pose ~17, segment ~12, classify 30, with the stream running |
 | `recamerad`: web page, WebRTC, RTSP, MJPEG, MQTT + Home Assistant, LLM/VLM, browser terminal | ✅ |
 | Wi-Fi HaLow (optional Morse Micro module) | ✅ ported, ⏳ untested (no module here) |
 | Firmware update from the page, Wi-Fi onboarding without a cable, Bluetooth configuration | ⏳ |
 
 Measured with everything on (detection, RTSP and MJPEG viewers): the daemon uses ~29 % CPU
-and 7–17 MB of RSS, ION 26–28 of 36 MB, ~165 MB of RAM free.
+and 7–17 MB of RSS, ION 26–36 of 48 MB depending on the model, ~164 MB of RAM available.
 
 ## Quick start
 
@@ -191,29 +191,35 @@ and the measurements in the docs.
 17. **The H.264 encoder derives the profile from the entropy coder**: asking for Baseline
     gives Main unless `CVI_VENC_SetH264Entropy()` sets CAVLC. Constrained Baseline is what
     every WebRTC client must accept.
-18. **An encoder channel without `u32BufSize` asks for 9 MiB** and, when ION is short, the
-    Sophgo error path hangs the SoC.
+18. **The encoders hang when ION runs out.** A channel without `u32BufSize` asks for 9 MiB;
+    the H.264 encoder allocates its reconstruction frames at the first frame. When either
+    allocation fails, the Sophgo error path hangs the SoC or leaves the codec stuck in the
+    driver. Size ION for the biggest model (a segment model's float outputs alone are ~7 MB)
+    and refuse a model that leaves the encoders too little.
 19. **`kill -9` leaks ~20 MB of ION and can hang the SoC.** The drivers do not free MPI objects
     when the owner dies, and the kernel closes the dead process's files in fd order — VI
     before VPSS — stopping the ISP under a running scaler. Fixed with two small osdrv patches,
     a reclaim step at start, and the VI fd duplicated above 900 so it closes last.
 20. **VI→VPSS online** removes the 9 MB VI frame pool; **4 VPSS blocks per pool**, not CPU, was
-    what kept both the stream and YOLO at full rate. 36 MiB of ION is enough with room for a
-    bigger model.
+    what kept both the stream and YOLO at full rate. ION is 48 MiB.
+21. **Models come in two output formats**: Sophgo's own export of detection (split INT8 heads,
+    raw DFL) and the plain Ultralytics export (`[1, C, 8400]`, already decoded, float).
+    Decode both, and read pose/segment/classify from the output shapes so a converted model
+    (e.g. a dog pose with 24 keypoints) works without code changes.
 
 **System**
-21. **The vendor U-Boot does pin muxing Linux relies on** (camera enable, camera I2C, ADC I2C,
+22. **The vendor U-Boot does pin muxing Linux relies on** (camera enable, camera I2C, ADC I2C,
     Bluetooth UART, LEDs, SD power): replacing the bootloader means moving that into the DT
     first (§ Boot firmware).
-22. **FAT12 boot partitions fragment**: the vendor's 8 MiB boot partition cannot hold two
+23. **FAT12 boot partitions fragment**: the vendor's 8 MiB boot partition cannot hold two
     kernels, and replacing the FIT in place made U-Boot fail with `Invalid FAT entry`. Ours is
     256 MiB FAT32.
-23. **`wpa_supplicant` reading its configuration from `/data` made the boot handshake take
+24. **`wpa_supplicant` reading its configuration from `/data` made the boot handshake take
     minutes**; from `/etc` (restored from `/data` before it starts) it takes seconds. Cause
     unknown.
-24. **The power-on reason register** does not match the Sophgo table; calibrated:
+25. **The power-on reason register** does not match the Sophgo table; calibrated:
     `0x000D0000` power-on, `0x04090003` reboot, `0x08090003` watchdog.
-25. **A ramoops buffer at the top of DRAM keeps the kernel log across the watchdog reset**
+26. **A ramoops buffer at the top of DRAM keeps the kernel log across the watchdog reset**
     (the reset is warm): that is how the `kill -9` hang above was found without a serial
     console.
 

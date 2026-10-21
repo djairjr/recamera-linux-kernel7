@@ -45,8 +45,16 @@ pub fn models(active: &str) -> Vec<serde_json::Value> {
             .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok());
         let title = meta.as_ref().and_then(|m| m.get("model_name")).and_then(|v| v.as_str()).map(String::from);
         let classes = meta.as_ref().and_then(|m| m.get("classes")).and_then(|v| v.as_array()).map(|a| a.len());
+        // for the list only: the .json's "task", else a guess from the names
+        // (the daemon finds the real one from the outputs when it loads it)
+        let task = meta.as_ref().and_then(|m| m.get("task")).and_then(|v| v.as_str()).map(String::from)
+            .unwrap_or_else(|| {
+                let s = format!("{n} {}", title.as_deref().unwrap_or("")).to_lowercase();
+                if s.contains("classif") { "classify" } else if s.contains("pose") { "pose" }
+                else if s.contains("seg") { "segment" } else { "detect" }.to_string()
+            });
         out.push(serde_json::json!({
-            "name": n, "size": size, "title": title, "classes": classes, "active": n == active,
+            "name": n, "size": size, "title": title, "classes": classes, "task": task, "active": n == active,
         }));
     }
     out

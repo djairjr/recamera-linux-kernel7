@@ -29,6 +29,9 @@ pub struct Live {
     pub dets: watch::Sender<Arc<str>>,
     /// MJPEG frames per second (stream.mjpeg_fps, changed live)
     pub mjpeg_fps: AtomicU32,
+    /// the running model (task, classes, keypoints, skeleton) as JSON, for
+    /// the page; "{}" without detection
+    pub model: Mutex<Arc<str>>,
     viewers: AtomicUsize,
     /// H.264 access units for RTSP
     pub h264: broadcast::Sender<Arc<Au>>,
@@ -45,6 +48,7 @@ impl Live {
             jpeg: watch::channel(Bytes::new()).0,
             dets: watch::channel(Arc::from("{}")).0,
             mjpeg_fps: AtomicU32::new(mjpeg_fps),
+            model: Mutex::new(Arc::from("{}")),
             viewers: AtomicUsize::new(0),
             h264: broadcast::channel(H264_BACKLOG).0,
             h264_params: Mutex::new(None),
