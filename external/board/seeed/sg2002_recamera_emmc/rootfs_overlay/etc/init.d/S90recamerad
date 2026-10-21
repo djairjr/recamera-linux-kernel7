@@ -1,0 +1,28 @@
+#!/bin/sh
+#
+# S90recamerad -- the reCamera daemon (app/recamerad, docs/application.md).
+# After the camera modules (S59camera) and /data (S01data). Logs to syslog
+# (/var/log/messages); events: recamera-events
+# reload: /etc/init.d/S90recamerad reload (SIGHUP, re-reads the configuration)
+
+PID=/run/recamerad.pid
+BIN=/usr/bin/recamerad
+
+case "$1" in
+	start)
+		printf "Starting recamerad: "
+		start-stop-daemon -S -q -b -m -p $PID -x $BIN && echo "OK" || echo "FAIL"
+		;;
+	stop)
+		printf "Stopping recamerad: "
+		start-stop-daemon -K -q -p $PID -s TERM && echo "OK" || echo "FAIL"
+		rm -f $PID
+		;;
+	reload)
+		start-stop-daemon -K -q -p $PID -s HUP
+		;;
+	restart)
+		"$0" stop; sleep 1; "$0" start ;;
+	*)
+		echo "Usage: $0 {start|stop|restart|reload}"; exit 1 ;;
+esac

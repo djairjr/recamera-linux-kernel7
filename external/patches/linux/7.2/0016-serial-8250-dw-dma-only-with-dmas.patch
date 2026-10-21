@@ -1,0 +1,25 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] serial: 8250_dw: only try DMA when "dmas" is described
+
+The driver hooked up DMA for every port with a FIFO; on boards whose DT
+gives the UART no dmas the request can only fail, and each open logged
+"failed to request DMA" before falling back to PIO.
+
+diff --color -ruN a/drivers/tty/serial/8250/8250_dw.c b/drivers/tty/serial/8250/8250_dw.c
+--- a/drivers/tty/serial/8250/8250_dw.c	2026-10-18 12:28:21.702527569 -0300
++++ b/drivers/tty/serial/8250/8250_dw.c	2026-10-18 12:28:21.747968987 -0300
+@@ -759,8 +759,12 @@
+ 	if (!data->skip_autocfg)
+ 		dw8250_setup_port(p);
+ 
+-	/* If we have a valid fifosize, try hooking up DMA */
+-	if (p->fifosize) {
++	/*
++	 * If we have a valid fifosize and the firmware describes DMA channels,
++	 * try hooking up DMA.  Without "dmas" the request can only fail, and
++	 * every open logged "failed to request DMA" before falling back to PIO.
++	 */
++	if (p->fifosize && device_property_present(p->dev, "dmas")) {
+ 		data->data.dma.rxconf.src_maxburst = p->fifosize / 4;
+ 		data->data.dma.txconf.dst_maxburst = p->fifosize / 4;
+ 		up->dma = &data->data.dma;

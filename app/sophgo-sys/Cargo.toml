@@ -1,0 +1,10 @@
+[package]
+name = "sophgo-sys"
+description = "Hand-written FFI to the Sophgo cv181x MPI and to recamera-cam"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+links = "recamera-cam"
+build = "build.rs"

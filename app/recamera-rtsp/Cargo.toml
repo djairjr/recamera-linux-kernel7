@@ -1,0 +1,10 @@
+[package]
+name = "recamera-rtsp"
+description = "RTSP/RTP pieces of the reCamera: H.264 Annex B, RTP packetization (RFC 6184), SDP, request parsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]

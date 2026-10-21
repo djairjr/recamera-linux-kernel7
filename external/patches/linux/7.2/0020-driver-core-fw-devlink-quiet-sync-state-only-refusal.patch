@@ -1,0 +1,39 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] driver core: fw_devlink: no error for a refused sync-state-only link
+
+device_link_add() refuses a SYNC_STATE_ONLY link when the consumer has
+already probed, by design. fw_devlink reported that as
+"Failed to create device link (0x180) with supplier ..." at dev_err, e.g.
+for the reset GPIO of the SDIO card node under the reCamera SD host,
+whose GPIO controller registers after the host probes. Log that case
+at debug level; behaviour and return value are unchanged.
+
+diff --color -ruN a/drivers/base/core.c b/drivers/base/core.c
+--- a/drivers/base/core.c	2026-10-18 15:54:37.478549491 -0300
++++ b/drivers/base/core.c	2026-10-18 15:54:37.493206170 -0300
+@@ -2237,8 +2237,23 @@
+ 		}
+ 
+ 		if (con != sup_dev && !device_link_add(con, sup_dev, flags)) {
+-			dev_err(con, "Failed to create device link (0x%x) with supplier %s for %pfwf\n",
+-				flags, dev_name(sup_dev), link->consumer);
++			/*
++			 * device_link_add() refuses a SYNC_STATE_ONLY link once
++			 * the consumer has probed, by design ("useless once a
++			 * consumer device has probed").  That is the normal
++			 * outcome when a child node of an already bound device
++			 * references a supplier that registers later (e.g. the
++			 * reset GPIO of an SDIO card node under an MMC host), so
++			 * it is not an error.  Same return value as before.
++			 */
++			if ((flags & DL_FLAG_SYNC_STATE_ONLY) &&
++			    con->links.status != DL_DEV_NO_DRIVER &&
++			    con->links.status != DL_DEV_PROBING)
++				dev_dbg(con, "Not creating sync-state-only link with %s for %pfwf: consumer already bound\n",
++					dev_name(sup_dev), link->consumer);
++			else
++				dev_err(con, "Failed to create device link (0x%x) with supplier %s for %pfwf\n",
++					flags, dev_name(sup_dev), link->consumer);
+ 			ret = -EINVAL;
+ 		}
+ 

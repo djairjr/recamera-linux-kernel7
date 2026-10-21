@@ -1,0 +1,97 @@
+#!/bin/sh
+#
+# S42eth-downshift -- keep eth0 usable when 100 Mbit/s does not hold: fall back
+# to 10 Mbit/s, and give 100 Mbit/s back when the cable is unplugged.
+#
+# Why (measured 2026-10-18, factory 5.10 and our 7.2 alike): with the vendor
+# GPIO->RJ45 adapter cable, 100BASE-TX comes up and drops ~1 s later, over and
+# over, with zero packets received; a link partner that keeps offering
+# 100 Mbit/s (router, switch) never gets a usable link.  At 10 Mbit/s the same
+# cable is clean (0% loss, no errors).  The PHY/driver are fine; the adapter
+# cannot carry 100BASE-TX.
+#
+# Rule:
+#   - if the link comes up at 100 and drops within FLAP_S seconds, FLAPS times
+#     inside WINDOW_S seconds, without any packet received, advertise only
+#     10baseT Half/Full (autonegotiation stays on, so the partner follows);
+#   - after the carrier stays down for UNPLUG_S seconds (cable removed),
+#     advertise everything again, so a better cable/adapter gets 100.
+# Log: /var/log/eth-downshift.log
+
+IF=eth0
+FLAPS=3
+FLAP_S=3
+WINDOW_S=30
+UNPLUG_S=10
+ADV_ALL=0x00f		# 10H 10F 100H 100F
+ADV_10=0x003		# 10H 10F
+LOG=/var/log/eth-downshift.log
+PIDFILE=/var/run/eth-downshift.pid
+
+log() { echo "$(date '+%F %T') $*" >> "$LOG"; }
+
+monitor() {
+	mode=all
+	prev=0; up_t=0; up_speed=0; up_rx=0
+	flaps=""		# uptimes (s) of short 100M flaps
+	down_since=0
+	while :; do
+		now=$(cut -d. -f1 /proc/uptime)
+		car=$(cat /sys/class/net/$IF/carrier 2>/dev/null || echo 0)
+		rx=$(cat /sys/class/net/$IF/statistics/rx_packets 2>/dev/null || echo 0)
+
+		if [ "$car" = 1 ] && [ "$prev" != 1 ]; then
+			up_t=$now
+			up_speed=$(cat /sys/class/net/$IF/speed 2>/dev/null || echo 0)
+			up_rx=$rx
+			down_since=0
+		elif [ "$car" != 1 ] && [ "$prev" = 1 ]; then
+			down_since=$now
+			if [ "$up_speed" = 100 ] && [ $((now - up_t)) -le $FLAP_S ] &&
+			   [ "$rx" = "$up_rx" ]; then
+				flaps="$flaps $now"
+				kept=""
+				for t in $flaps; do
+					[ $((now - t)) -le $WINDOW_S ] && kept="$kept $t"
+				done
+				flaps=$kept
+				n=$(echo $flaps | wc -w)
+				if [ "$mode" = all ] && [ "$n" -ge $FLAPS ]; then
+					ethtool -s $IF advertise $ADV_10 &&
+						{ mode=10; flaps=""; log "100 Mbit/s does not hold ($n flaps in ${WINDOW_S}s, no RX): advertising 10 only"; }
+				fi
+			fi
+		elif [ "$car" != 1 ] && [ "$mode" = 10 ] && [ "$down_since" -gt 0 ] &&
+		     [ $((now - down_since)) -ge $UNPLUG_S ]; then
+			ethtool -s $IF advertise $ADV_ALL &&
+				{ mode=all; log "carrier down ${UNPLUG_S}s (cable unplugged?): advertising 100 again"; }
+		fi
+		prev=$car
+		sleep 1
+	done
+}
+
+case "$1" in
+	start)
+		printf "Starting eth0 downshift monitor: "
+		[ -d /sys/class/net/$IF ] || { echo "skip (no $IF)"; exit 0; }
+		command -v ethtool >/dev/null || { echo "FAIL (no ethtool)"; exit 1; }
+		monitor </dev/null >/dev/null 2>&1 &
+		echo $! > "$PIDFILE"
+		echo "OK"
+		;;
+	stop)
+		printf "Stopping eth0 downshift monitor: "
+		[ -f "$PIDFILE" ] && kill "$(cat "$PIDFILE")" 2>/dev/null
+		rm -f "$PIDFILE"
+		ethtool -s $IF advertise $ADV_ALL 2>/dev/null
+		echo "OK"
+		;;
+	restart|reload)
+		"$0" stop; "$0" start
+		;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"
+		exit 1
+		;;
+esac

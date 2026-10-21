@@ -1,0 +1,20 @@
+# reCamera application workspace (MIT OR Apache-2.0).
+# docs/application.md: the stages and the decisions behind this code.
+[workspace]
+resolver = "3"
+members = ["sophgo-sys", "sophgo", "recamera-detect", "recamera-rtsp", "recamerad", "recamera-events", "recamera-yolo"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Djair Guilherme <djair.jr@gmail.com>"]
+rust-version = "1.96"
+
+# Small binaries: the camera has ~210 MB of RAM for everything.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

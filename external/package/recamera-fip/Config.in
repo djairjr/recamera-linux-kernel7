@@ -1,0 +1,9 @@
+config BR2_PACKAGE_RECAMERA_FIP
+	bool "recamera-fip (boot chain: official fip with patched OpenSBI)"
+	help
+	  The fip.bin the SG2002 ROM loads (FSBL + OpenSBI + U-Boot +
+	  FreeRTOS), checked in as built: the official Seeed one
+	  (fip-seeed-original.bin) with only its OpenSBI replaced by the
+	  same vendor OpenSBI 0.9 plus the fence.tso emulation the T-Head
+	  C906 needs. make-fip.sh rebuilds it from the vendor SDK.
+	  Installed as images/fip.bin. See README.md here.

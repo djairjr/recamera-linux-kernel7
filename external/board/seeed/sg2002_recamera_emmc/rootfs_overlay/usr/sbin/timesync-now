@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# timesync-now -- set the clock from the network right now, then hand over to
+# the ntpd daemon.
+#
+# This board has no battery-backed RTC: it boots at the last saved time
+# (S01timestamp) or at 1970, and TLS certificates, websockets, MQTT and
+# everything above them fail until the clock is right.  ntpd started by S49ntp
+# at boot comes up before the network and only steps the clock minutes later,
+# so this is run the moment a lease is obtained (udhcpc hook 50-timesync).
+#
+# Steps: stop the daemon (it holds UDP 123), one-shot "ntpd -gq" (step the
+# clock however far off it is, then exit), save the time, restart the daemon.
+# Only one instance runs at a time (flock).
+
+LOCK=/run/timesync.lock
+LOG=/var/log/timesync.log
+# On the eMMC the stamp lives in /data, which survives slot updates and
+# reinstalls; from the SD card (no /data mount) it stays in the rootfs.
+if grep -q " /data " /proc/mounts; then
+	STAMP=/data/recamera/timestamp
+	mkdir -p /data/recamera
+else
+	STAMP=/var/lib/timestamp
+fi
+TRIES=3
+
+exec 9>"$LOCK"
+flock -n 9 || exit 0
+
+{
+	echo "=== $(date) timesync start (${1:-manual})"
+	/etc/init.d/S49ntp stop
+	ok=1
+	i=0
+	while [ $i -lt $TRIES ]; do
+		if timeout 40 /usr/sbin/ntpd -gq; then
+			ok=0
+			break
+		fi
+		i=$((i + 1))
+		sleep 5
+	done
+	if [ $ok -eq 0 ]; then
+		date +%s > "$STAMP"
+		touch /run/time-synced
+		echo "synced: $(date)"
+	else
+		echo "FAILED after $TRIES tries; ntpd daemon will keep trying"
+	fi
+	/etc/init.d/S49ntp start
+} >> "$LOG" 2>&1

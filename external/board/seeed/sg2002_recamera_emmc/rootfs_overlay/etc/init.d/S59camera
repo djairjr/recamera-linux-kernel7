@@ -1,0 +1,32 @@
+#!/bin/sh
+#
+# S59camera -- load the Sophgo multimedia modules (F7), in the vendor order
+# (loadsystemko.sh): ION allocator, sys, base (VIP clocks), sensor I2C,
+# MIPI-CSI receiver (cif), VI + ISP, VPSS, video codecs (vcodec, jpeg,
+# cvi_vc_driver; channel counts in /etc/modprobe.d/cvi_vc_driver.conf), NPU
+# (cv181x_tpu, /dev/cvi-tpu0). The
+# sensor is powered by the DT (cam-en gpio hog).
+# Check: recamera-vicap 30 /data/frame.yuv [vpss|jpeg [n]|h264 [n]|yolo [n]]
+
+MODULES="cvi_ion cv181x_sys cv181x_base snsr_i2c cvi_mipi_rx cv181x_vi cv181x_vpss \
+	cv181x_vcodec cv181x_jpeg cvi_vc_driver cv181x_tpu"
+
+case "$1" in
+	start)
+		printf "Loading camera modules: "
+		for m in $MODULES; do
+			modprobe "$m" || { echo "FAIL ($m)"; exit 1; }
+		done
+		echo "OK"
+		;;
+	stop)
+		# cvi_ion is permanent (no module_exit): the rest unloads in reverse
+		for m in cv181x_tpu cvi_vc_driver cv181x_jpeg cv181x_vcodec cv181x_vpss cv181x_vi cvi_mipi_rx snsr_i2c cv181x_base cv181x_sys; do
+			modprobe -r "$m" 2>/dev/null
+		done
+		;;
+	restart|reload)
+		"$0" stop; "$0" start ;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# S01timestamp -- (after S01data mounts /data) keep the clock from going back to 1970 on a board without a
+# battery-backed RTC.
+#
+# start: if the last saved time is later than the clock, set the clock to it
+#        (certificates still validate by date, logs stay in order) until the
+#        network sets the real time (udhcpc hook -> timesync-now).
+# stop:  save the current time, unless it is still the 1970 default.
+# timesync-now also saves the time after every successful sync.
+
+# On the eMMC the stamp lives in /data, which survives slot updates and
+# reinstalls; from the SD card (no /data mount) it stays in the rootfs.
+if grep -q " /data " /proc/mounts; then
+	STAMP=/data/recamera/timestamp
+	mkdir -p /data/recamera
+else
+	STAMP=/var/lib/timestamp
+fi
+MIN_VALID=1735689600	# 2025-01-01, anything earlier is an unset clock
+
+case "$1" in
+	start)
+		printf "Restoring last known time: "
+		saved=$(cat "$STAMP" 2>/dev/null)
+		now=$(date +%s)
+		if [ -n "$saved" ] && [ "$saved" -gt "$now" ] 2>/dev/null; then
+			date -s "@$saved" >/dev/null && echo "$(date)" || echo "FAIL"
+		else
+			echo "kept $(date)"
+		fi
+		;;
+	stop)
+		now=$(date +%s)
+		[ "$now" -gt "$MIN_VALID" ] && date +%s > "$STAMP"
+		;;
+	restart|reload)
+		;;
+	*)
+		echo "Usage: $0 {start|stop}"
+		exit 1
+		;;
+esac

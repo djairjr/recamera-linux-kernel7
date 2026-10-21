@@ -1,0 +1,106 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] net: phy: cvitek: plain genphy read_status, as the vendor ships
+
+The vendor tree keeps an auto-negotiation retry workaround in
+cv182xa_read_status() but its build reverts it
+(external/linux/patches/001_net_phy_cvitek_revert_read_status.patch), so
+the factory kernel runs plain genphy_read_status(). Do the same.
+
+diff --color -ruN a/drivers/net/phy/cvitek.c b/drivers/net/phy/cvitek.c
+--- a/drivers/net/phy/cvitek.c	2026-10-18 14:45:05.759709823 -0300
++++ b/drivers/net/phy/cvitek.c	2026-10-18 14:45:05.783519184 -0300
+@@ -37,88 +37,14 @@
+ 
+ static int cv182xa_read_status(struct phy_device *phydev)
+ {
+-	u32 lp_val, lp_val_cap, cap_val, cap_val_temp, i, ramdom_cap;
+-	u32 get_random;
++	/*
++	 * Plain genphy status, as the vendor's final kernel has it: the vendor
++	 * tree carries the auto-negotiation retry workaround in cvitek.c but
++	 * reverts it at build time (reCamera-OS external/linux/patches/
++	 * 001_net_phy_cvitek_revert_read_status.patch).
++	 */
+ 	int err = genphy_read_status(phydev);
+-	//pr_notice("link status=%x, retry_time=%x\n", phydev->link, retry_time);
+-	if (retry_time > 0)
+-		retry_time--;
+ 
+-	if (phydev->link == 0) {
+-		if (retry_time == 0)
+-			link_status = 0;
+-
+-	} else if (phydev->speed == SPEED_100 && link_status == 0) {
+-		link_status = 1;
+-		lp_val = phy_read(phydev, 0x5);
+-		pr_notice("lp1=%x\n", lp_val);
+-		if (phydev->autoneg == AUTONEG_ENABLE && lp_val == 0x4d61) {
+-			cap_val = phy_read(phydev, 0x4);
+-			pr_notice("cap1=%x\n", cap_val);
+-			get_random_bytes(&get_random, sizeof(int32_t));
+-			//ramdom_cap = (get_random % 13) << 5;
+-			//if(ramdom_cap == 0x160)
+-			//{
+-			//	ramdom_cap = 0x1e0;
+-			//}
+-			//cap_val_temp = cap_val & ~0x1e0 | ramdom_cap;
+-			ramdom_cap =  get_random & 0xde0 | 0x20;
+-			if (ramdom_cap == 0xd60) {
+-				pr_notice("ramdom_cap=%x\n\n", ramdom_cap);
+-				ramdom_cap = 0xde0;
+-			}
+-			cap_val_temp = cap_val & ~0xde0 | ramdom_cap;
+-			phy_write(phydev, 0x4, cap_val_temp);
+-			pr_notice("get_random=%x, ramdom_cap=%x, cap_val_temp=%x\n",
+-				 get_random, ramdom_cap, cap_val_temp);
+-			for (i = 0; i < 150; i++) {
+-				if ((phy_read(phydev, 0x1) & 0x20) == 0)
+-					break;
+-
+-				mdelay(10);
+-				}
+-			pr_notice("i=%d\n", i);
+-			phy_modify(phydev, MII_BMCR, BMCR_ISOLATE, BMCR_ANENABLE | BMCR_ANRESTART);
+-			for (i = 0; i < 1000; i++) {
+-				if (phy_read(phydev, 0x1) & 0x20)
+-					break;
+-				mdelay(10);
+-			}
+-			lp_val = phy_read(phydev, 0x5);
+-			lp_val_cap = lp_val & 0xde0;
+-			pr_notice(" %d, link status=%x, lp2=%x\n", i, phy_read(phydev, 0x1), lp_val);
+-
+-			if (((phy_read(phydev, 0x1) & 0x4) != 0) && lp_val != 0 && lp_val_cap != ramdom_cap) {
+-				retry_time = 10;
+-				phy_write(phydev, 0x4, cap_val);
+-				phy_modify(phydev, MII_BMCR, BMCR_ISOLATE, BMCR_ANENABLE | BMCR_ANRESTART);
+-				for (i = 0; i < 1000; i++) {
+-					if (phy_read(phydev, 0x1) & 0x20)
+-						break;
+-
+-					mdelay(10);
+-				}
+-				//mdelay(8000);
+-				//lp_val = phy_read(phydev, 0x5);
+-				pr_notice(" %d, true link status=%x, lp2=%x\n", i,
+-					 phy_read(phydev, 0x1), phy_read(phydev, 0x5));
+-			} else {
+-				phydev->link = 0;
+-				link_status = 0;
+-				phy_write(phydev, 0x4, cap_val);
+-				phy_modify(phydev, MII_BMCR, BMCR_ISOLATE, BMCR_ANENABLE | BMCR_ANRESTART);
+-				//err = phy_start_aneg(phydev);
+-				//lp_val = phy_read(phydev, 0x5);
+-				//pr_notice("lp3=%x\n", lp_val);
+-				pr_notice(" %d, false link status=%x, lp2=%x\n", i,
+-					 phy_read(phydev, 0x1), phy_read(phydev, 0x5));
+-			}
+-
+-			//err = genphy_read_status(phydev);
+-			//lp_val = phy_read(phydev, 0x5);
+-			//pr_notice("lp3=%x\n", lp_val);
+-		}
+-	}
+ 	pr_debug("%s, speed=%d, duplex=%d, ", __func__, phydev->speed, phydev->duplex);
+ 	pr_debug("pasue=%d, asym_pause=%d, autoneg=%d ", phydev->pause, phydev->asym_pause, phydev->autoneg);
+ 

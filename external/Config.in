@@ -1,0 +1,13 @@
+# Configuration options of this br2-external tree (reCamera).
+
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/morse-driver/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/morse-cli/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/wpa-supplicant-s1g/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/sophgo-ion/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/sophgo-osdrv/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/sophgo-mpi/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/sophgo-cviruntime/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/recamera-firmware/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/recamera-fip/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/recamera-tests/Config.in"
+source "$BR2_EXTERNAL_RECAMERA_PATH/package/recamera-app/Config.in"

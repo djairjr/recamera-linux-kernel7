@@ -1,0 +1,25 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] riscv: do not emit fence.tso by default (T-Head C906)
+
+The SG2002's T-Head C906 core does not implement fence.tso: it raises an
+illegal-instruction exception instead of executing it as the plain fence
+the encoding falls back to (fence.tso is FENCE with fm=1000, defined so
+that cores without Ztso run it as fence rw,rw). GCC emits fence.tso for
+__atomic_thread_fence(__ATOMIC_ACQ_REL), so C++ code (libstdc++ shared_ptr
+release, 60 sites in libstdc++.so) died with SIGILL on the camera.
+
+Make -mno-fence-tso the default: the compiler then emits fence rw,rw, a
+strictly stronger barrier, so ordering is preserved. -mfence-tso turns it
+back on for other cores. reCamera F7, docs/multimedia.md §6.2.
+
+--- a/gcc/config/riscv/riscv.opt	2026-10-19 15:53:01.891273876 -0300
++++ b/gcc/config/riscv/riscv.opt	2026-10-19 15:53:01.893273829 -0300
+@@ -675,7 +675,7 @@
+ Specify TLS dialect.
+ 
+ mfence-tso
+-Target Var(TARGET_FENCE_TSO) Init(1)
++Target Var(TARGET_FENCE_TSO) Init(0)
+ Specifies whether the fence.tso instruction should be used.
+ 
+ mautovec-segment

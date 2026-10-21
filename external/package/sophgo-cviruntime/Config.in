@@ -1,0 +1,9 @@
+config BR2_PACKAGE_SOPHGO_CVIRUNTIME
+	bool "sophgo-cviruntime (Sophgo TPU/NPU runtime)"
+	depends on BR2_INSTALL_LIBSTDCPP
+	select BR2_PACKAGE_SOPHGO_OSDRV
+	help
+	  The Sophgo NPU userspace for the SG2002 (cv181x): libcviruntime,
+	  which loads .cvimodel files and runs them on the TPU through
+	  /dev/cvi-tpu0, and libcvikernel, which builds the TPU commands.
+	  See docs/multimedia.md §4.8.

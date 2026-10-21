@@ -1,0 +1,82 @@
+#!/bin/sh
+#
+# S45usbnet -- network over the USB-C port (usb0 = 192.168.42.1), as on the
+# vendor system.
+#
+# Vendor chain (factory SD 0.2.4): S70hardware -> /mnt/system/usb-net.sh ->
+#   uhubon.sh device          (/proc/cviusb/otg_role = device)
+#   run_usb.sh probe ncm      (configfs gadget "cvitek", VID 0x3346 PID 0x100C,
+#   run_usb.sh start ncm       "Cvitek" / "NCM" / serial 0123456789)
+# then dhcpcd pins usb0 to 192.168.42.1/24 and dnsmasq (usb_only.conf) leases
+# 192.168.42.10-242 with router 192.168.42.1.
+#
+# Here the port is a device by DT (dr_mode = "peripheral"), the gadget is the
+# same NCM function over configfs, and busybox udhcpd serves the same range.
+
+GADGET=/sys/kernel/config/usb_gadget/cvitek
+ADDR=192.168.42.1
+UDHCPD_CONF=/etc/udhcpd-usb0.conf
+
+start() {
+	printf "Starting USB network (usb0 %s): " "$ADDR"
+
+	grep -q " /sys/kernel/config " /proc/mounts || \
+		mount -t configfs none /sys/kernel/config || { echo "FAIL (configfs)"; return 1; }
+
+	UDC=$(ls /sys/class/udc 2>/dev/null | head -n 1)
+	[ -n "$UDC" ] || { echo "FAIL (no UDC: is dr_mode peripheral?)"; return 1; }
+
+	if [ ! -d "$GADGET" ]; then
+		mkdir -p "$GADGET" || { echo "FAIL (gadget)"; return 1; }
+		echo 0x3346 > "$GADGET/idVendor"
+		echo 0x100C > "$GADGET/idProduct"
+		mkdir -p "$GADGET/strings/0x409"
+		echo "0123456789" > "$GADGET/strings/0x409/serialnumber"
+		echo "Cvitek"     > "$GADGET/strings/0x409/manufacturer"
+		echo "NCM"        > "$GADGET/strings/0x409/product"
+		mkdir -p "$GADGET/configs/c.1/strings/0x409"
+		echo "ncm" > "$GADGET/configs/c.1/strings/0x409/configuration"
+		mkdir -p "$GADGET/functions/ncm.usb0"
+		# Stable MACs instead of random ones at every boot, so the host
+		# keeps the same interface: derived from the board MAC (eth0,
+		# from the efuse), locally administered; host side = +1.
+		BASE=$(cat /sys/class/net/eth0/address 2>/dev/null)
+		if [ -n "$BASE" ]; then
+			set -- $(echo "$BASE" | tr ':' ' ')
+			B0=$(printf "%02x" $((0x$1 | 0x02)))
+			DEV="$B0:$2:$3:$4:$5:$6"
+			HOST="$B0:$2:$3:$4:$5:$(printf "%02x" $(((0x$6 + 1) & 0xff)))"
+			echo "$DEV"  > "$GADGET/functions/ncm.usb0/dev_addr"
+			echo "$HOST" > "$GADGET/functions/ncm.usb0/host_addr"
+		fi
+		ln -s "$GADGET/functions/ncm.usb0" "$GADGET/configs/c.1/"
+	fi
+	[ -n "$(cat "$GADGET/UDC")" ] || echo "$UDC" > "$GADGET/UDC"
+
+	IFACE=$(cat "$GADGET/functions/ncm.usb0/ifname" 2>/dev/null)
+	[ -n "$IFACE" ] || IFACE=usb0
+	ip addr flush dev "$IFACE" 2>/dev/null
+	ip addr add "$ADDR/24" dev "$IFACE"
+	ip link set "$IFACE" up
+
+	mkdir -p /var/lib/misc
+	touch /var/lib/misc/udhcpd.leases
+	start-stop-daemon -S -b -m -p /var/run/udhcpd-usb0.pid \
+		-x /usr/sbin/udhcpd -- -f "$UDHCPD_CONF"
+
+	echo "OK ($IFACE on $UDC)"
+}
+
+stop() {
+	printf "Stopping USB network: "
+	start-stop-daemon -K -q -p /var/run/udhcpd-usb0.pid
+	[ -d "$GADGET" ] && echo "" > "$GADGET/UDC" 2>/dev/null
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

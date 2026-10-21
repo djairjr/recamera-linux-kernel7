@@ -1,0 +1,27 @@
+#!/bin/sh
+#
+# S02watchdog -- feed the SoC watchdog (dw_wdt, patch 0023) so that a hung
+# system reboots by itself instead of waiting for a power cycle (F7: the
+# JPEG/ION hangs of 19/10/2026 needed one each). BusyBox watchdog: reboot
+# after 30 s without a feed, fed every 10 s. Stopping it closes the device
+# with the magic character, which disarms the watchdog.
+
+case "$1" in
+	start)
+		printf "Starting watchdog: "
+		if [ -c /dev/watchdog ]; then
+			start-stop-daemon -S -q -x /sbin/watchdog -- -T 30 -t 10 /dev/watchdog \
+				&& echo "OK" || echo "FAIL"
+		else
+			echo "no /dev/watchdog"
+		fi
+		;;
+	stop)
+		printf "Stopping watchdog: "
+		start-stop-daemon -K -q -x /sbin/watchdog && echo "OK" || echo "FAIL"
+		;;
+	restart|reload)
+		"$0" stop; "$0" start ;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

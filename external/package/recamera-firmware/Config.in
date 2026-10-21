@@ -1,0 +1,9 @@
+config BR2_PACKAGE_RECAMERA_FIRMWARE
+	bool "recamera-firmware (Wi-Fi, Bluetooth and HaLow firmware)"
+	help
+	  The firmware the reCamera radios load, downloaded from their
+	  public sources at pinned commits (sha256 checked):
+	  - CYW43012 Wi-Fi (brcmfmac43012-sdio .bin/.clm_blob/.txt) and
+	    Bluetooth (.hcd) from the Seeed reCamera trees;
+	  - Morse Micro MM6108 HaLow firmware and the Quectel FGH100M
+	    board configuration from MorseMicro/morse-firmware.

@@ -1,0 +1,13 @@
+#!/bin/sh
+#
+# udhcpc hook: as soon as any interface gets (or renews) a lease, set the
+# clock from the network.  Runs in the background so the lease handling is
+# not held up; timesync-now itself makes sure only one run is active.
+# Called by /usr/share/udhcpc/default.script with the event as $1.
+
+case "$1" in
+	bound|renew)
+		/usr/sbin/timesync-now "$1:$interface" </dev/null >/dev/null 2>&1 &
+		;;
+esac
+exit 0

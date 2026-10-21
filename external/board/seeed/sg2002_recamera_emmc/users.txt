@@ -1,0 +1,6 @@
+# Buildroot users table (manual, "Makeusers syntax"):
+# username uid group gid password home shell groups comment
+# The owner's login, present in every image, slot and reinstall; "=" = plain
+# text password, hashed at build time. "sudo" group: rule enabled by the sudo
+# package (%sudo ALL=(ALL:ALL) ALL).
+recamera 1000 recamera 1000 =recamera /home/recamera /bin/sh sudo,audio,video,dialout reCamera

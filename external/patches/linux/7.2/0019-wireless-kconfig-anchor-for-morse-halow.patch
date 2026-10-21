@@ -1,0 +1,33 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] wireless: add a Kconfig anchor for the out-of-tree Morse driver
+
+The vendor builds the Morse Micro HaLow driver in tree, and its Kconfig
+selects CRC7 and the CCMP/GCMP crypto. Built out of tree here, nothing
+selects CRC7 (prompt-less), so morse.ko cannot link crc7_be. Add a
+symbol that carries those selects.
+
+diff --color -ruN a/drivers/net/wireless/Kconfig b/drivers/net/wireless/Kconfig
+--- a/drivers/net/wireless/Kconfig	2026-10-18 14:50:59.502725450 -0300
++++ b/drivers/net/wireless/Kconfig	2026-10-18 14:50:59.519733783 -0300
+@@ -35,6 +35,21 @@
+ source "drivers/net/wireless/st/Kconfig"
+ source "drivers/net/wireless/ti/Kconfig"
+ source "drivers/net/wireless/zydas/Kconfig"
++
++config MORSE_HALOW_DEPS
++	tristate "Kernel support for the out-of-tree Morse Micro HaLow driver"
++	depends on MAC80211
++	select CRC7
++	select CRYPTO_AES
++	select CRYPTO_CCM
++	select CRYPTO_GCM
++	select CRYPTO_CMAC
++	select CRYPTO_CTR
++	help
++	  Selects what the Morse Micro 802.11ah driver (built out of tree, as
++	  the reCamera package morse-driver) needs from the kernel; these are
++	  the selects of the driver's own Kconfig (WLAN_VENDOR_MORSE).  CRC7
++	  has no prompt, so it can only be enabled this way.
+ source "drivers/net/wireless/quantenna/Kconfig"
+ 
+ source "drivers/net/wireless/virtual/Kconfig"

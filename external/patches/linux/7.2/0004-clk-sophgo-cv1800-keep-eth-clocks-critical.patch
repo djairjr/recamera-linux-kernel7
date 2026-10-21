@@ -1,0 +1,32 @@
+--- a/drivers/clk/sophgo/clk-cv1800.c
++++ b/drivers/clk/sophgo/clk-cv1800.c
+@@ -414,15 +414,26 @@
+ 		   REG_CLK_EN_0, 30,
+ 		   CLK_IS_CRITICAL);
+ 
+-/* ETH */
++/* ETH
++ *
++ * Both ETH0 clocks are CLK_IS_CRITICAL, as they are in the vendor clock
++ * driver that runs the working system: drivers/clk/cvitek/clk-cv181x.c
++ * declares clk_500m_eth0 (REG_CLK_EN_0 bit 25) and clk_axi4_eth0
++ * (REG_CLK_EN_0 bit 26) with CLK_IS_CRITICAL, so the clock framework never
++ * gates them and the MAC is never touched with its clocks closed. The same
++ * two clocks are the ones the MAC takes as "stmmaceth" (CLK_AXI4_ETH0) and
++ * "ptp_ref" (CLK_ETH0_500M) in the device tree, and the 7.2 stmmac enables
++ * the PTP reference clock only in stmmac_setup_ptp(), after
++ * stmmac_hw_setup() has already reset the DMA engine.
++ */
+ static CV1800_BYPASS_DIV(clk_eth0_500m, clk_bypass_fpll_parents,
+ 			 REG_CLK_EN_0, 25,
+ 			 REG_DIV_CLK_GPIO_DB, 16, 4, 3, CV1800_DIV_FLAG,
+ 			 REG_CLK_BYP_0, 9,
+-			 0);
++			 CLK_IS_CRITICAL);
+ static CV1800_GATE(clk_axi4_eth0, clk_axi4_bus_parents,
+ 		   REG_CLK_EN_0, 26,
+-		   0);
++		   CLK_IS_CRITICAL);
+ static CV1800_BYPASS_DIV(clk_eth1_500m, clk_bypass_fpll_parents,
+ 			 REG_CLK_EN_0, 27,
+ 			 REG_DIV_CLK_GPIO_DB, 16, 4, 3, CV1800_DIV_FLAG,

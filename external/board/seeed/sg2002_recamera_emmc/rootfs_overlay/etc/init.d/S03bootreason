@@ -1,0 +1,67 @@
+#!/bin/sh
+#
+# S03bootreason -- record why the board came up, to tell thermal shutdowns,
+# watchdog resets and power losses apart (F7 thermal work).
+#
+# RTC_ST_ON_REASON (0x050260F8, RTC block, always-on domain; vendor
+# osdrv base.c cvi_base_read_chip_pwr_on_reason). The vendor decoding
+# (0x800d0000 cold boot, 0x880d0003 watchdog, 0x840d0003 warm reset) does not
+# match this board as is (software reboot read 0x04090003 on 18/10/2026), so
+# the raw value is logged and calibrated against known causes. Measured on
+# the reCamera (19/10/2026): 0x000D0000 power-on after a power cut,
+# 0x04090003 software reboot (warm reset), 0x08090003 watchdog reset (S02watchdog
+# killed, dw_wdt patch 0023); anything else is logged as "unknown".
+# One line per boot in /data/recamera/boot-history.log; the last lines of the
+# previous boot's thermal.log are kept next to it.
+# After a watchdog reset or an unknown cause, the previous boot's kernel log
+# kept by ramoops (pstore, A3) goes to /data/recamera/crash/boot-<n>-<cause>/
+# (n = the line of this boot in boot-history.log: the clock at this point is
+# the saved timestamp, not the real time; the last 10 kept): the log of a
+# hang that no network capture survives.
+
+LOGDIR=/data/recamera
+LOG=$LOGDIR/boot-history.log
+CRASHDIR=$LOGDIR/crash
+PSTORE=/sys/fs/pstore
+
+# copy what pstore kept of the previous boot, keep the last 10 copies
+save_pstore() {
+	ls $PSTORE/* >/dev/null 2>&1 || return 0
+	d=$CRASHDIR/boot-$(wc -l < "$LOG" | tr -d " ")-$1
+	mkdir -p "$d" && cp $PSTORE/* "$d/" 2>/dev/null
+	# a record stays in ramoops until deleted: drop it, or an old oops
+	# comes back with the next reset
+	rm -f $PSTORE/*
+	ls -1d $CRASHDIR/*/ 2>/dev/null | head -n -10 | xargs -r rm -rf
+	echo " pstore saved in $d"
+}
+
+case "$1" in
+	start)
+		printf "Recording boot reason: "
+		mkdir -p "$LOGDIR"
+		mountpoint -q $PSTORE || mount -t pstore pstore $PSTORE 2>/dev/null
+		reason=$(devmem 0x050260F8 32 2>/dev/null)
+		slot=$(sed -n 's/.*recamera\.slot=\([ab]\).*/\1/p' /proc/cmdline)
+		fb=$(sed -n 's/.*recamera\.fallback=\([01]\).*/\1/p' /proc/cmdline)
+		case "$reason" in
+			0x000D0000) cause=power-on ;;
+			0x04090003) cause=reboot ;;
+			0x08090003) cause=watchdog ;;
+			*) cause=unknown ;;
+		esac
+		last=""
+		[ -f "$LOGDIR/thermal.log" ] && last=$(tail -n 1 "$LOGDIR/thermal.log")
+		echo "$(date -Iseconds) reason=${reason:-?} cause=$cause slot=${slot:-sd} fallback=${fb:-0} last_thermal=[$last]" >> "$LOG"
+		sync
+		printf "%s (%s)" "${reason:-?}" "$cause"
+		case "$cause" in
+			watchdog|unknown) save_pstore "$cause" ;;
+			*) echo ;;
+		esac
+		;;
+	stop|restart|reload)
+		;;
+	*)
+		echo "Usage: $0 {start}"; exit 1 ;;
+esac

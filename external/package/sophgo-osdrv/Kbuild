@@ -1,0 +1,149 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Out-of-tree build of the Sophgo osdrv kernel modules (vendor
+# osdrv/interdrv, cv181x = SG2002) for Linux 7.2, in one Kbuild instead of
+# the vendor per-directory Makefiles (which need the vendor build env).
+# F7, docs/multimedia.md: modules are added step by step.
+
+CVIARCH_L := cv181x
+
+# The ION Kconfig symbols, IDENTICAL to sophgo-ion's Kbuild: they change the
+# layout of struct ion_buffer (name, paddr...) shared with cvi_ion.ko.
+ccflags-y += -DCONFIG_ION=1 -DCONFIG_ION_CARVEOUT_HEAP=1 -DCONFIG_ION_CVITEK=1
+# vendor Makefile.interdrv.param
+ccflags-y += -D__CV181X__
+# vendor per-module flags (sys/Makefile, base/Makefile)
+ccflags-y += -Wall -Wextra -Werror -Wno-unused-parameter -Wno-sign-compare
+
+ccflags-y += \
+	-I$(src)/include/common/uapi \
+	-I$(src)/include/common/kapi \
+	-I$(src)/include/chip/$(CVIARCH_L)/uapi \
+	-I$(src)/base \
+	-I$(src)/base/mw \
+	-I$(src)/base/chip/$(CVIARCH_L) \
+	-I$(src)/sys/common \
+	-I$(src)/sys/common/uapi \
+	-I$(src)/sys/common/kapi \
+	-I$(SOPHGO_ION_DIR)
+
+# --- step 2: sys + base ---
+obj-m += $(CVIARCH_L)_sys.o
+$(CVIARCH_L)_sys-y := sys/common/sys.o sys/common/sys_context.o
+
+obj-m += $(CVIARCH_L)_base.o
+$(CVIARCH_L)_base-y := base/base.o base/chip/$(CVIARCH_L)/vip_sys.o base/reg.o \
+	base/cvi_vb_proc.o base/cvi_log_proc.o base/cvi_sys_proc.o \
+	base/base_context.o base/vb.o
+
+# --- step 3: snsr_i2c (kernel-side sensor I2C, frame-synced writes for vi) ---
+obj-m += snsr_i2c.o
+snsr_i2c-y := snsr_i2c/common/snsr_i2c.o
+CFLAGS_snsr_i2c/common/snsr_i2c.o += -I$(src)/snsr_i2c/common -I$(src)/snsr_i2c/chip/$(CVIARCH_L)
+
+# --- step 4: cif = cvi_mipi_rx (MIPI-CSI receiver, sensor MCLK/pinmux) ---
+# kernel-5.10-headers: the vendor pinctrl headers the vendor cif includes from
+# its kernel (drivers/pinctrl/cvitek, GPL), copied by sophgo-osdrv.mk.
+obj-m += cvi_mipi_rx.o
+cvi_mipi_rx-y := cif/chip/$(CVIARCH_L)/cif.o cif/chip/$(CVIARCH_L)/drv/cif_drv.o
+# CONFIG_COMMON_CLK_CVITEK: the vendor Kconfig has "default ARCH_CVITEK", so
+# every vendor build (the reCamera's included) takes the clk-framework MCLK
+# path: clk_set_rate(clk_cam0, 24 MHz) + clk_prepare_enable. The #else "hack"
+# writes the CAM0 divider to 0x030020F4, which is not the cv181x CAM0 divider
+# (REG_CLK_CAM0_SRC_DIV = 0x8C0 in both clock drivers): dead code there.
+CFLAGS_cif/chip/$(CVIARCH_L)/cif.o += -I$(src)/cif/chip/$(CVIARCH_L) -I$(src)/kernel-5.10-headers -I$(src)/snsr_i2c/common \
+	-DCONFIG_COMMON_CLK_CVITEK
+CFLAGS_cif/chip/$(CVIARCH_L)/drv/cif_drv.o += -I$(src)/cif/chip/$(CVIARCH_L)
+
+# --- step 4: vi = cv181x_vi (video input + ISP) ---
+vi-dir := vi/chip/$(CVIARCH_L)
+cv181x_vi-objs := vi/common/vi_core.o \
+	$(vi-dir)/vi.o $(vi-dir)/vi_ext.o $(vi-dir)/cmdq.o $(vi-dir)/vi_sdk_layer.o \
+	$(vi-dir)/vi_isp_buf_ctrl.o $(vi-dir)/vi_raw_dump.o \
+	$(vi-dir)/vip/vi_drv.o $(vi-dir)/vip/vi_subsys_ctrl.o $(vi-dir)/vip/vi_fe_ip_ctrl.o \
+	$(vi-dir)/vip/vi_be_ip_ctrl.o $(vi-dir)/vip/vi_raw_ip_ctrl.o $(vi-dir)/vip/vi_rgb_ip_ctrl.o \
+	$(vi-dir)/vip/vi_yuv_ip_ctrl.o $(vi-dir)/vip/vi_tun_ip_ctrl.o $(vi-dir)/vip/vi_ip_test_case.o \
+	$(vi-dir)/vip/vi_perf_chk.o \
+	$(vi-dir)/proc/vi_proc.o $(vi-dir)/proc/vi_dbg_proc.o $(vi-dir)/proc/vi_isp_proc.o
+obj-m += cv181x_vi.o
+# -Wno-missing-prototypes/-declarations: the vendor VI calls dozens of functions across its
+# files without declaring them in headers (style, not correctness); the rest
+# of the vendor -Werror set stays on.
+$(foreach o,$(cv181x_vi-objs),$(eval CFLAGS_$(o) += -I$(src)/$(vi-dir) -I$(src)/vi/common -I$(src)/include -Wno-missing-prototypes -Wno-missing-declarations))
+
+# --- step 5: vpss = cv181x_vpss (scaling / colour conversion) ---
+vpss-dir := vpss/chip/$(CVIARCH_L)
+cv181x_vpss-objs := vpss/common/cvi_vip_vpss_proc.o vpss/common/reg.o vpss/common/vpss.o \
+	vpss/common/vpss_rgn_ctrl.o vpss/common/vpss_ioctl.o \
+	$(vpss-dir)/vip_img.o $(vpss-dir)/vip_sc.o $(vpss-dir)/dsi_phy.o \
+	$(vpss-dir)/scaler.o $(vpss-dir)/vpss_core.o
+obj-m += cv181x_vpss.o
+# vendor vpss/chip/cv181x/chip.mk options; same prototype relaxation as vi
+$(foreach o,$(cv181x_vpss-objs),$(eval CFLAGS_$(o) += -I$(src)/$(vpss-dir) -I$(src)/vpss/common -I$(src)/include \
+	-DCONFIG_CVI_LOG -DCONFIG_REG_DUMP -DCONFIG_TILE_MODE -Wno-missing-prototypes -Wno-missing-declarations))
+
+# --- step 6-8: hardware codecs (JPEG / H.264 / H.265) ---
+# Vendor loadsystemko.sh order: cv181x_vcodec, cv181x_jpeg, cvi_vc_driver.
+# vcodec + jpeg are the low-level device drivers (clocks, IRQs, register
+# windows, /dev/vcodec + /dev/jpu); cvi_vc_driver holds the Chips&Media
+# VPU/JPU API and the MPI venc/vdec context (/dev/cvi-venc, /dev/cvi-vdec ...).
+obj-m += $(CVIARCH_L)_vcodec.o
+$(CVIARCH_L)_vcodec-objs := vcodec/cvi_vcodec.o vcodec/vcodec_common.o vcodec/hal/$(CVIARCH_L)/cvi_vcodec_cfg.o
+$(foreach o,$($(CVIARCH_L)_vcodec-objs),$(eval CFLAGS_$(o) += -I$(src)/vcodec \
+	-DCNM_FPGA_PLATFORM -DCNM_FPGA_PCI_INTERFACE -DCVI_H26X_USE_ION_FW_BUFFER -DUSE_KERNEL_MODE \
+	-Wno-missing-prototypes -Wno-missing-declarations))
+
+obj-m += $(CVIARCH_L)_jpeg.o
+$(CVIARCH_L)_jpeg-objs := jpeg/cvi_jpeg.o jpeg/jpeg_common.o jpeg/jmm.o jpeg/hal/$(CVIARCH_L)/cvi_jpeg_cfg.o
+$(foreach o,$($(CVIARCH_L)_jpeg-objs),$(eval CFLAGS_$(o) += -I$(src)/jpeg \
+	-DCHIP_BM1880 -DASIC_EVB -DUSE_KERNEL_MODE -Wno-missing-prototypes -Wno-missing-declarations))
+
+vc-dir := cvi_vc_drv
+vc-enc := $(vc-dir)/vcodec
+vc-jpg := $(vc-dir)/jpeg
+cvi_vc_driver-objs := $(vc-dir)/common/rcKernel/cvi_rc_kernel.o \
+	$(vc-dir)/common/rcKernel/cvi_float_point/cvi_float_point.o \
+	$(vc-dir)/common/rcKernel/cvi_float_point/cvi_soft_float.o \
+	$(vc-enc)/sample/main_enc_cvitest.o \
+	$(vc-enc)/sample/helper/main_helper.o $(vc-enc)/sample/helper/vpuhelper.o \
+	$(vc-enc)/sample/helper/bitstream/bitstreamfeeder.o $(vc-enc)/sample/helper/bitstream/bitstreamreader.o \
+	$(vc-enc)/sample/helper/bitstream/bsfeeder_fixedsize_impl.o $(vc-enc)/sample/helper/bitstream/bsfeeder_es_in_impl.o \
+	$(vc-enc)/sample/helper/comparator/comparator.o $(vc-enc)/sample/helper/display/simplerenderer.o \
+	$(vc-enc)/sample/helper/misc/cfgParser.o $(vc-enc)/sample/helper/misc/cnm_video_helper.o \
+	$(vc-enc)/sample/helper/misc/datastructure.o $(vc-enc)/sample/helper/misc/platform.o \
+	$(vc-enc)/sample/helper/misc/debug.o $(vc-enc)/sample/helper/misc/pbu.o \
+	$(vc-enc)/sample/helper/yuv/yuvfeeder.o $(vc-enc)/sample/helper/yuv/yuvAddrfeeder.o \
+	$(vc-enc)/vdi/linux/vdi.o $(vc-enc)/vdi/linux/vdi_osal.o \
+	$(vc-enc)/vpuapi/product.o $(vc-enc)/vpuapi/vpuapifunc.o $(vc-enc)/vpuapi/vpuapi.o \
+	$(vc-enc)/vpuapi/coda9/coda9.o $(vc-enc)/vpuapi/wave/common/common.o $(vc-enc)/vpuapi/wave/wave4/wave4.o \
+	$(vc-enc)/cvi/cvi_enc_rc.o $(vc-enc)/cvi/cvi_vcodec_lib.o $(vc-enc)/cvi/cvi_enc_internal.o \
+	$(vc-enc)/cvi/cvi_dec_internal.o $(vc-enc)/cvi/cvi_vdec_api.o \
+	$(vc-enc)/cvi/cvi_h265_dec.o $(vc-enc)/cvi/cvi_h264_dec.o \
+	$(vc-jpg)/jdi/linux/jdi.o $(vc-jpg)/jpuapi/jpuapi.o $(vc-jpg)/jpuapi/jpuapifunc.o \
+	$(vc-jpg)/src/jpuhelper.o $(vc-jpg)/src/jpulog.o $(vc-jpg)/src/mixer.o \
+	$(vc-jpg)/cvi_jpg_interface/src/cvi_jpg_interface.o \
+	$(vc-jpg)/cvi_jpg_interface/src/cvi_jpg_dec_internal.o \
+	$(vc-jpg)/cvi_jpg_interface/src/cvi_jpg_enc_internal.o \
+	$(vc-jpg)/cvi_jpg_interface/test/cvi_jpg_codec.o \
+	$(vc-dir)/module/src/enc_ctx.o $(vc-dir)/module/src/cvi_venc.o $(vc-dir)/module/src/cvi_vdec.o \
+	$(vc-dir)/cvi_vc_drv.o $(vc-dir)/cvi_vc_drv_proc.o
+obj-m += cvi_vc_driver.o
+vc-inc := $(vc-dir) $(vc-dir)/include $(vc-dir)/common \
+	$(vc-enc) $(vc-enc)/sample $(vc-enc)/sample/helper $(vc-enc)/sample/helper/misc \
+	$(vc-enc)/vpuapi $(vc-enc)/vdi $(vc-enc)/cvi \
+	$(vc-jpg) $(vc-jpg)/include $(vc-jpg)/jdi $(vc-jpg)/jdi/linux $(vc-jpg)/jpuapi $(vc-jpg)/src \
+	$(vc-jpg)/cvi_jpg_interface $(vc-jpg)/cvi_jpg_interface/src $(vc-jpg)/cvi_jpg_interface/inc \
+	$(vc-dir)/module/include include
+# vendor cvi_vc_drv/Makefile defines; same prototype relaxation as vi/vpss
+$(foreach o,$(cvi_vc_driver-objs),$(eval CFLAGS_$(o) += $(addprefix -I$(src)/,$(vc-inc)) \
+	-DUSE_KERNEL_MODE -DCVI_H26X_USE_ION_MEM -DCVI_JPG_USE_ION_MEM -DBITSTREAM_ION_CACHED_MEM \
+	-DMJPEG_INTERFACE_API -DCVI_H26X_ES_BUFFER_QUEUE_ENABLE -DCVI_H26X_USE_ION_FW_BUFFER \
+	-DENV_SET_ADDR_REMAP -DENABLE_DEC -DVC_DEBUG_BASIC_LEVEL \
+	-Wno-missing-prototypes -Wno-missing-declarations))
+
+# --- step 9: tpu = cv181x_tpu (NPU: TDMA + TIU command processor, /dev/cvi-tpu0) ---
+obj-m += $(CVIARCH_L)_tpu.o
+$(CVIARCH_L)_tpu-objs := tpu/common/cvi_tpu_interface.o tpu/hal/$(CVIARCH_L)/tpu_platform.o tpu/hal/$(CVIARCH_L)/tpu_pmu.o
+$(foreach o,$($(CVIARCH_L)_tpu-objs),$(eval CFLAGS_$(o) += -I$(src)/tpu/common -I$(src)/tpu/hal/$(CVIARCH_L) \
+	-I$(src)/include/uapi -I$(src)/include/chip/$(CVIARCH_L)/uapi/linux -I$(SOPHGO_ION_DIR)/ion \
+	-Wno-missing-prototypes -Wno-missing-declarations))

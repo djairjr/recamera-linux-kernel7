@@ -1,0 +1,49 @@
+#!/bin/sh
+#
+# S01data -- mount the persistent DATA partition on /data when the system runs
+# from the eMMC (root on mmcblk0p2 = slot A or mmcblk0p3 = slot B). From the SD
+# card /data stays a plain directory of the card's rootfs.
+#
+# eMMC layout (docs/emmc-layout.md): p1 BOOT, p2 ROOT_A, p3 ROOT_B,
+# p4 DATA (ext4, label "data").
+#
+# Ownership, set at every boot (19/10/2026): the group "recamera" writes in
+# /data, /data/models and /data/tests (setgid: new files keep the group);
+# /data/recamera holds the system logs (thermal, boot reason), root-owned and
+# world-readable.
+
+DATA_DEV=/dev/mmcblk0p4
+
+root_dev() {
+	for a in $(cat /proc/cmdline); do
+		case "$a" in root=*) echo "${a#root=}"; return ;; esac
+	done
+}
+
+case "$1" in
+	start)
+		printf "Mounting /data: "
+		case "$(root_dev)" in
+			/dev/mmcblk0p2|/dev/mmcblk0p3) ;;
+			*) echo "not on eMMC, skipped"; exit 0 ;;
+		esac
+		mkdir -p /data
+		grep -q " /data " /proc/mounts && { echo "already"; exit 0; }
+		fsck.ext4 -p "$DATA_DEV" >/dev/null 2>&1
+		[ $? -le 1 ] || echo -n "(fsck $?) "
+		mount -t ext4 -o noatime "$DATA_DEV" /data || { echo "FAIL"; exit 1; }
+		mkdir -p /data/models /data/recamera /data/tests
+		chown root:recamera /data /data/models /data/tests
+		chmod 2775 /data /data/models /data/tests
+		chown root:root /data/recamera
+		chmod 755 /data/recamera
+		echo "OK"
+		;;
+	stop)
+		grep -q " /data " /proc/mounts && umount /data
+		;;
+	restart|reload)
+		"$0" stop; "$0" start ;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

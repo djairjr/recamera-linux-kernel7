@@ -1,0 +1,12 @@
+config BR2_PACKAGE_SOPHGO_OSDRV
+	bool "sophgo-osdrv (Sophgo multimedia kernel modules)"
+	depends on BR2_LINUX_KERNEL
+	select BR2_PACKAGE_SOPHGO_ION
+	help
+	  The Sophgo osdrv kernel modules for the SG2002 (cv181x): sys,
+	  base, and, step by step, the MIPI-CSI receiver, VI/ISP, VPSS,
+	  TPU and the codecs. Vendor osdrv/interdrv, built out of tree
+	  for Linux 7.2. F7, see docs/multimedia.md.
+
+comment "sophgo-osdrv needs a Linux kernel"
+	depends on !BR2_LINUX_KERNEL

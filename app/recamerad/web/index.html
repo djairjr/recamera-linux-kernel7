@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reCamera</title>
+<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="/vendor/xterm.css">
+</head>
+<body>
+
+<section id="login" hidden>
+  <form id="login-form" class="card login">
+    <h1>reCamera</h1>
+    <label>User <input name="user" autocomplete="username" value="recamera" required></label>
+    <label>Password <input name="password" type="password" autocomplete="current-password" required></label>
+    <button type="submit">Log in</button>
+    <p id="login-error" class="error" hidden></p>
+  </form>
+</section>
+
+<div id="app" hidden>
+  <nav id="side">
+    <div class="brand">reCamera</div>
+    <a href="#camera" data-page="camera">Camera</a>
+    <a href="#yolo" data-page="yolo">YOLO</a>
+    <a href="#network" data-page="network">Network</a>
+    <a href="#mqtt" data-page="mqtt">MQTT</a>
+    <a href="#llm" data-page="llm">LLM</a>
+    <a href="#system" data-page="system">System</a>
+    <a href="#terminal" data-page="terminal">Terminal</a>
+    <div class="spacer"></div>
+    <div class="who"><span id="who"></span> <button id="logout" class="link">Log out</button></div>
+  </nav>
+
+  <main>
+    <section id="page-camera" class="page">
+      <div class="camera">
+        <div class="video">
+          <div id="frame">
+            <video id="video" autoplay muted playsinline hidden></video>
+            <img id="stream" alt="live stream" hidden>
+            <canvas id="overlay"></canvas>
+          </div>
+          <div class="toolbar">
+            <span id="presence" class="pill">–</span>
+            <span id="mode" class="pill"></span>
+            <span id="rates" class="muted"></span>
+            <span class="grow"></span>
+            <button id="roi-draw">Draw area of interest</button>
+            <button id="roi-clear">Clear area of interest</button>
+            <a id="snap" class="button" href="/snapshot.jpg" target="_blank">Snapshot</a>
+          </div>
+          <p id="roi-hint" class="muted" hidden>Drag over the picture to mark the area of interest: the target counts when its base (bottom centre of the box) is inside it.</p>
+          <h3>Events</h3>
+          <ul id="events" class="events"></ul>
+        </div>
+
+        <form id="controls" class="card controls">
+          <h3>Detection</h3>
+          <label class="row"><input type="checkbox" data-k="detection.enabled"> Detection on</label>
+          <label>Target <select data-k="detection.target_class" data-num></select></label>
+          <label>Confidence <output></output>
+            <input type="range" min="0.05" max="0.95" step="0.01" data-k="detection.threshold" data-num></label>
+          <label>Overlap (NMS) <output></output>
+            <input type="range" min="0.1" max="0.9" step="0.01" data-k="detection.nms" data-num></label>
+          <label>Minimum size <output></output>
+            <input type="range" min="0" max="0.5" step="0.005" data-k="detection.min_area" data-num></label>
+          <label>Frames to confirm <output></output>
+            <input type="range" min="1" max="30" step="1" data-k="detection.confirm_frames" data-num></label>
+          <label>Seconds to leave <output></output>
+            <input type="range" min="0" max="30" step="0.5" data-k="detection.leave_after_s" data-num></label>
+
+          <h3>LLM</h3>
+          <label class="row"><input type="checkbox" data-k="llm.enabled"> Send detections to the LLM</label>
+
+          <h3>Picture</h3>
+          <label>Brightness <output></output>
+            <input type="range" min="0" max="100" step="1" data-k="camera.brightness" data-num></label>
+          <label>Contrast <output></output>
+            <input type="range" min="0" max="100" step="1" data-k="camera.contrast" data-num></label>
+          <label>Saturation <output></output>
+            <input type="range" min="0" max="100" step="1" data-k="camera.saturation" data-num></label>
+          <label>Hue <output></output>
+            <input type="range" min="0" max="100" step="1" data-k="camera.hue" data-num></label>
+          <label>Sharpness <output></output>
+            <input type="range" min="0" max="100" step="1" data-k="camera.sharpness" data-num></label>
+          <label class="row"><input type="checkbox" data-k="camera.mirror"> Mirror (left-right)</label>
+          <label class="row"><input type="checkbox" data-k="camera.flip"> Flip (upside down)</label>
+          <button type="button" id="picture-reset">Reset picture</button>
+
+          <h3>Light and stream</h3>
+          <label>White LED <output></output>
+            <input type="range" min="0" max="255" step="1" data-k="led.brightness" data-num></label>
+          <label>Stream fps <output></output>
+            <input type="range" min="1" max="30" step="1" data-k="stream.mjpeg_fps" data-num></label>
+          <label>JPEG quality <output></output>
+            <input type="range" min="30" max="95" step="1" data-k="stream.jpeg_quality" data-num></label>
+          <p id="save-state" class="muted"></p>
+        </form>
+      </div>
+    </section>
+
+    <section id="page-yolo" class="page">
+      <h2>YOLO</h2>
+      <div class="system">
+        <div class="card">
+          <h3>Models in /data/models</h3>
+          <ul id="models" class="models"></ul>
+          <h3>Add a model</h3>
+          <p class="muted">A YOLOv8/YOLO11 detection model converted for the cv181x NPU (.cvimodel,
+            640&times;640 RGB input), and its .json with the class names ("classes": [...]).</p>
+          <input type="file" id="model-file" accept=".cvimodel,.json" multiple>
+          <p id="model-state" class="muted"></p>
+        </div>
+      </div>
+    </section>
+
+    <section id="page-system" class="page">
+      <h2>System</h2>
+      <div class="system">
+        <table id="status" class="card kv"></table>
+
+        <div class="card">
+          <h3>Time zone</h3>
+          <select id="timezone"></select>
+          <p class="muted">Clock: <span id="clock"></span></p>
+
+          <h3>Password</h3>
+          <form id="password-form" class="stack">
+            <input type="password" name="current" placeholder="Current password" autocomplete="current-password" required>
+            <input type="password" name="new" placeholder="New password (6 or more)" autocomplete="new-password" minlength="6" required>
+            <input type="password" name="again" placeholder="New password again" autocomplete="new-password" required>
+            <button type="submit">Change password</button>
+            <p id="password-state" class="muted"></p>
+          </form>
+          <p class="muted">The same password opens this page, ssh and the terminal.</p>
+
+          <h3>Terminal</h3>
+          <label class="row"><input type="checkbox" id="terminal-on"> Terminal page (a shell in the browser)</label>
+
+          <h3>Restart</h3>
+          <button id="reboot">Reboot the camera</button>
+        </div>
+      </div>
+
+      <h3>Recent log</h3>
+      <div class="toolbar"><button id="log-refresh">Refresh</button></div>
+      <pre id="log" class="card log"></pre>
+
+      <h3>Crash reports</h3>
+      <p class="muted">The kernel log kept across a watchdog reset (pstore), copied at the next boot.</p>
+      <ul id="crashes" class="events"></ul>
+      <pre id="crash" class="card log" hidden></pre>
+    </section>
+
+    <section id="page-network" class="page">
+      <h2>Network</h2>
+      <div class="system">
+        <div class="card">
+          <h3>Wi-Fi</h3>
+          <table id="wifi-status" class="kv"></table>
+          <h3>Addresses</h3>
+          <table id="net-addresses" class="kv"></table>
+          <h3>Saved networks</h3>
+          <ul id="wifi-saved" class="models"></ul>
+          <p class="muted">The saved networks are tried in turn when the current one is out of reach.</p>
+        </div>
+        <div class="card">
+          <h3>Networks in range</h3>
+          <div class="toolbar"><button id="wifi-scan" type="button">Scan</button><span id="wifi-scan-state" class="muted"></span></div>
+          <ul id="wifi-list" class="models"></ul>
+          <form id="wifi-form" class="stack" hidden>
+            <p>Connect to <b id="wifi-ssid"></b></p>
+            <input type="password" name="psk" placeholder="Password (empty for an open network)" autocomplete="off">
+            <button type="submit">Connect</button>
+          </form>
+          <p id="wifi-state" class="muted"></p>
+          <p class="muted">Changing the network can drop this page if you reached it over Wi-Fi:
+            the camera stays reachable over USB (192.168.42.1).</p>
+        </div>
+      </div>
+    </section>
+    <section id="page-mqtt" class="page">
+      <h2>MQTT</h2>
+      <div class="system">
+        <form id="mqtt-form" class="card stack wide">
+          <label class="row"><input type="checkbox" data-m="enabled"> Connect to a broker</label>
+          <label>Broker <input data-m="host" placeholder="192.168.1.10 or mqtt.example.com"></label>
+          <label>Port <input data-m="port" type="number" min="1" max="65535"></label>
+          <label>User <input data-m="username" autocomplete="off"></label>
+          <label>Password <input data-m="password" type="password" autocomplete="new-password"></label>
+          <label class="row"><input type="checkbox" data-m="tls"> TLS (usually port 8883)</label>
+          <label>Base topic <input data-m="base_topic"></label>
+          <label class="row"><input type="checkbox" data-m="discovery"> Home Assistant discovery</label>
+          <label>Discovery prefix <input data-m="discovery_prefix"></label>
+          <label>Device name <input data-m="device_name"></label>
+          <label>Camera entity: a frame every (s, 0 = off) <input data-m="camera_interval_s" type="number" min="0" max="3600"></label>
+          <div class="toolbar"><button type="submit">Save</button><button type="button" id="mqtt-test">Test broker</button></div>
+          <p id="mqtt-test-state" class="muted"></p>
+          <p id="mqtt-save" class="muted"></p>
+        </form>
+        <div class="card">
+          <h3>Connection</h3>
+          <table id="mqtt-status" class="kv"></table>
+          <h3>Topics</h3>
+          <p class="muted">Under <code id="mqtt-base"></code>: <code>status</code> (online/offline), <code>target</code> (ON/OFF),
+            <code>event</code> (arrival/departure JSON), <code>telemetry</code>, <code>snapshot</code> (JPEG at every arrival),
+            <code>camera</code> (a frame every few seconds), <code>llm</code> (the last LLM answer);
+            commands <code>detection/set</code>, <code>led/set</code>, <code>led/brightness/set</code>. With discovery on, Home Assistant shows the camera
+            as one device with these entities. For live video in Home Assistant add the RTSP stream
+            (<code>rtsp://user:password@camera/live</code>) with the Generic Camera integration.</p>
+        </div>
+      </div>
+    </section>
+    <section id="page-llm" class="page">
+      <h2>LLM</h2>
+      <div class="system">
+        <form id="llm-form" class="card stack wide">
+          <label class="row"><input type="checkbox" data-l="enabled"> Send the frame of every arrival</label>
+          <label>Endpoint <input data-l="endpoint" placeholder="https://ollama.com/v1/chat/completions"></label>
+          <label>Model <input data-l="model" placeholder="gemma3:4b, gpt-4o-mini, …"></label>
+          <label>API key <input data-l="api_key" type="password" autocomplete="new-password" placeholder="empty: no key"></label>
+          <label>Prompt <textarea data-l="prompt" rows="5"></textarea></label>
+          <p class="muted">{label} becomes the name of the target. The detection (class, score, box) goes with the picture.</p>
+          <label>Answer length (max tokens) <input data-l="max_tokens" type="number" min="1" max="8192"></label>
+          <label>Time limit (s) <input data-l="timeout_s" type="number" min="1" max="300"></label>
+          <label>At most one request every (s) <input data-l="min_interval_s" type="number" min="0" max="86400"></label>
+          <div class="toolbar"><button type="submit">Save</button><button type="button" id="llm-test">Test with the current frame</button></div>
+          <p id="llm-save" class="muted"></p>
+        </form>
+        <div class="card">
+          <h3>Test</h3>
+          <p id="llm-test-state" class="muted">The test sends the form as it is (saved or not) with a frame taken now.</p>
+          <img id="llm-test-img" class="shot" alt="frame sent" hidden>
+          <p id="llm-test-answer" class="answer"></p>
+          <h3>Last answers</h3>
+          <ul id="llm-last" class="events"></ul>
+          <h3>Endpoints</h3>
+          <p class="muted"><code>http(s)://…/chat/completions</code>: the OpenAI chat API, spoken by OpenAI, Ollama
+            (<code>https://ollama.com/v1/chat/completions</code>, or <code>http://host:11434/v1/chat/completions</code>
+            on your network), OpenRouter, vLLM and others; the model must read images.
+            <code>ws(s)://…</code>: a service of your own; one JSON message out
+            (<code>type, model, prompt, max_tokens, detection, image</code>), the first message back is the answer.</p>
+        </div>
+      </div>
+    </section>
+    <section id="page-terminal" class="page">
+      <div class="toolbar"><h2 class="grow">Terminal</h2><span id="term-state" class="muted"></span><button id="term-reconnect" type="button">Reconnect</button></div>
+      <div id="term" class="term"></div>
+      <p class="muted">A login of the camera, as over ssh: user and password, then that account's shell (<code>su</code> for root).</p>
+    </section>
+  </main>
+</div>
+
+<script src="/vendor/xterm.js"></script>
+<script src="/vendor/addon-fit.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>

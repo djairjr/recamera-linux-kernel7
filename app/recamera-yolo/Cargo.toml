@@ -1,0 +1,12 @@
+[package]
+name = "recamera-yolo"
+description = "Run the YOLO detection model on saved RGB frames (NPU), print the detections"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sophgo = { path = "../sophgo" }
+lexopt = "0.3"

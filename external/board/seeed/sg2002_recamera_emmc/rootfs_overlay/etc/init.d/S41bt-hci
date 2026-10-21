@@ -1,0 +1,63 @@
+#!/bin/sh
+#
+# S41bt-hci -- bring up the Bluetooth half of the onboard CYW43012 as hci0.
+#
+# Same sequence as the vendor system (factory SD 0.2.4: S41bt-init ->
+# /usr/local/bin/bt-init-daemon.sh), measured working there:
+#   brcm_patchram_plus --no2bytes --patchram <hcd> /dev/ttyS1
+#   hciattach /dev/ttyS1 any 115200 flow
+#   hciconfig hci0 up
+# -> hci0 UP RUNNING, BD 60:FF:9E:xx:xx:xx (the WiFi MAC minus one).
+#
+# Hardware: UART1 = ttyS1 with RTS/CTS (pinmux in the DTS, uart1_cfg).
+# BT_REG_ON is the same pin as WIFI_REG_ON (gpio510 = porta 30, held high by
+# the wifi_reg_on gpio-hog), so the BT core is already powered when we start.
+# Bringing BT up does not disturb WiFi: measured on the factory system with
+# and without this step, WiFi associated the same.
+#
+# bluetoothd (S40bluetoothd, from bluez5_utils) is already running and picks
+# hci0 up through the management interface once it appears.
+
+DEV=/dev/ttyS1
+HCD=/lib/firmware/brcm/CYW43012C0_003.001.015.0196.0269.hcd
+LOG=/var/log/bt-hci.log
+PIDFILE=/var/run/bt-hciattach.pid
+
+start() {
+	printf "Starting Bluetooth HCI (CYW43012 on %s): " "$DEV"
+	[ -e "$HCD" ] || { echo "FAIL (no $HCD)"; return 1; }
+	[ -c "$DEV" ] || { echo "FAIL (no $DEV)"; return 1; }
+	{
+		echo "=== $(date) patchram"
+		brcm_patchram_plus --no2bytes --patchram "$HCD" "$DEV"
+		echo "patchram exit=$?"
+		echo "=== hciattach"
+		start-stop-daemon -S -q -p "$PIDFILE" -x /usr/bin/hciattach -- \
+			"$DEV" any 115200 flow
+		echo "hciattach exit=$?"
+		pidof hciattach > "$PIDFILE"
+		i=0
+		while [ $i -lt 20 ] && ! hciconfig hci0 >/dev/null 2>&1; do
+			sleep 0.5; i=$((i + 1))
+		done
+		hciconfig hci0 up
+		echo "hciconfig up exit=$?"
+		hciconfig -a hci0
+	} >> "$LOG" 2>&1 &
+	echo "OK (background, log $LOG)"
+}
+
+stop() {
+	printf "Stopping Bluetooth HCI: "
+	hciconfig hci0 down 2>/dev/null
+	start-stop-daemon -K -q -p "$PIDFILE" 2>/dev/null || killall -q hciattach
+	rm -f "$PIDFILE"
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; sleep 1; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

@@ -1,0 +1,77 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] cviruntime: build without git and with GCC 15 / musl
+
+See docs/multimedia.md §4.8.
+
+diff -ruN a/CMakeLists.txt b/CMakeLists.txt
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -8,7 +8,11 @@
+   RESULT_VARIABLE GIT_EXEC_RESULT
+   OUTPUT_VARIABLE GIT_SHORT_HASH)
+ 
+-string(STRIP ${GIT_SHORT_HASH} GIT_SHORT_HASH)
++# reCamera: built from a tarball-like copy, no git; keep a fixed tag then
++if (NOT GIT_EXEC_RESULT EQUAL 0)
++  set(GIT_SHORT_HASH "sg2002-5.10")
++endif()
++string(STRIP "${GIT_SHORT_HASH}" GIT_SHORT_HASH)
+ string(TIMESTAMP BUILD_TIME "%Y%m%d")
+ set(RUNTIME_VERSION "${GIT_SHORT_HASH}@${BUILD_TIME}")
+ message(STATUS "runtime version: ${RUNTIME_VERSION}")
+@@ -114,7 +118,12 @@
+ endif()
+ 
+ add_subdirectory(src)
+-add_subdirectory(tool)
++# reCamera: the vendor test tools (argparse.hpp) do not build with GCC 15;
++# the camera uses its own checks on the C API instead
++option(ENABLE_TOOLS "build the vendor model_runner & co" ON)
++if (ENABLE_TOOLS)
++  add_subdirectory(tool)
++endif()
+ if (ENABLE_PYRUNTIME STREQUAL "ON")
+   add_subdirectory(python)
+ endif()
+diff -ruN a/src/common/model.cpp b/src/common/model.cpp
+--- a/src/common/model.cpp
++++ b/src/common/model.cpp
+@@ -471,17 +471,20 @@
+ std::string CviModel::getChipType(
+     const std::string &modelFile,
+     const int8_t *buf, size_t size) {
+-  BaseStream *stream;
++  /* reCamera: the asserts vanish in a release build (NDEBUG), which left
++   * an uninitialised pointer / a short read; fail with an empty chip name */
++  BaseStream *stream = nullptr;
+   if (!modelFile.empty()) {
+     stream = new FileStream(modelFile);
+   } else if (buf) {
+     stream = new BufferStream(buf, size);
+   } else {
+-    assert(0);
++    return std::string();
+   }
+   if (stream->length() <= sizeof(MODEL_HEADER)) {
+     TPU_LOG_ERROR("Error, invalid cvimodel file\n");
+-    assert(0);
++    delete stream;
++    return std::string();
+   }
+   MODEL_HEADER header;
+   stream->read((uint8_t *)&header, 0, sizeof(header));
+diff -ruN a/src/soc/181x/tpu_pmu.cpp b/src/soc/181x/tpu_pmu.cpp
+--- a/src/soc/181x/tpu_pmu.cpp
++++ b/src/soc/181x/tpu_pmu.cpp
+@@ -119,9 +119,9 @@
+     sprintf(str1 , "%s" , tmpStr);
+ 
+   if (element->tdmaReg.sys_dtype)
+-    sprintf(element->typeStr, "%s %s", "TDMA Matrix", str1);
++    snprintf(element->typeStr, sizeof(element->typeStr), "%s %.37s", "TDMA Matrix", str1); /* reCamera: bounded */
+   else
+-    sprintf(element->typeStr, "%s %s", "TDMA Tensor", str1);
++    snprintf(element->typeStr, sizeof(element->typeStr), "%s %.37s", "TDMA Tensor", str1);
+ }
+ 
+ static void tpu_pmu_fill_cmdbuf(uint8_t *v_dma_buf)

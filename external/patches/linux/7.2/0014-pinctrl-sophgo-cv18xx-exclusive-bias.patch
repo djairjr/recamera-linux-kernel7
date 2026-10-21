@@ -1,0 +1,47 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] pinctrl: sophgo: cv18xx: make the bias exclusive
+
+The pads come out of reset with the internal pull-down enabled, and the
+config mask was built only from the property named, so bias-pull-up
+left both pulls active. Board DTs worked around it with a second bias
+(bias-pull-down = <0>), which pinconf-generic rejects at every boot with
+"cannot have multiple bias configurations". Pulling one way now clears
+the other, and bias-disable clears both.
+
+diff --color -ruN a/drivers/pinctrl/sophgo/pinctrl-cv18xx.c b/drivers/pinctrl/sophgo/pinctrl-cv18xx.c
+--- a/drivers/pinctrl/sophgo/pinctrl-cv18xx.c	2026-10-18 12:27:23.543803769 -0300
++++ b/drivers/pinctrl/sophgo/pinctrl-cv18xx.c	2026-10-18 12:27:23.561602554 -0300
+@@ -333,13 +333,33 @@
+ 		u32 arg = pinconf_to_config_argument(configs[i]);
+ 
+ 		switch (param) {
++		/*
++		 * A bias is exclusive: the pads come out of reset with the
++		 * pull-down on, and writing only the bit that was named left
++		 * both pulls active (bias-pull-up -> 60k up against 62k down,
++		 * a released line parks near half rail).  Pulling one way
++		 * clears the other; bias-disable clears both.
++		 */
+ 		case PIN_CONFIG_BIAS_PULL_DOWN:
+ 			FIELD_MODIFY(PIN_IO_PULLDOWN, &v, arg);
+ 			m |= PIN_IO_PULLDOWN;
++			if (arg) {
++				FIELD_MODIFY(PIN_IO_PULLUP, &v, 0);
++				m |= PIN_IO_PULLUP;
++			}
+ 			break;
+ 		case PIN_CONFIG_BIAS_PULL_UP:
+ 			FIELD_MODIFY(PIN_IO_PULLUP, &v, arg);
+ 			m |= PIN_IO_PULLUP;
++			if (arg) {
++				FIELD_MODIFY(PIN_IO_PULLDOWN, &v, 0);
++				m |= PIN_IO_PULLDOWN;
++			}
++			break;
++		case PIN_CONFIG_BIAS_DISABLE:
++			FIELD_MODIFY(PIN_IO_PULLUP, &v, 0);
++			FIELD_MODIFY(PIN_IO_PULLDOWN, &v, 0);
++			m |= PIN_IO_PULLUP | PIN_IO_PULLDOWN;
+ 			break;
+ 		case PIN_CONFIG_DRIVE_STRENGTH_UA:
+ 			ret = sophgo_pinctrl_oc2reg(pctrl, sp,

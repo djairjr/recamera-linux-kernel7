@@ -1,0 +1,27 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] dmaengine: dw-axi-dmac: quiet apb_regs error in fixed-channel mode
+
+On Sophgo CV18xx (AXI_DMA_FLAG_ARG0_AS_CHAN) the dmamux ties each request
+line to a fixed channel and the controller has no handshake select
+register, so dw_axi_dma_set_hw_channel() has nothing to do. It printed
+"apb_regs not initialized" at every channel start and stop; keep the
+error only for the other modes.
+
+diff --color -ruN a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c
+--- a/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c	2026-10-18 12:22:50.041805337 -0300
++++ b/drivers/dma/dw-axi-dmac/dw-axi-dmac-platform.c	2026-10-18 12:22:50.058480061 -0300
+@@ -574,7 +574,13 @@
+ 	unsigned long reg_value, val;
+ 
+ 	if (!chip->apb_regs) {
+-		dev_err(chip->dev, "apb_regs not initialized\n");
++		/*
++		 * With the handshake used as the channel number (Sophgo
++		 * CV18xx: the dmamux ties each request to a fixed channel)
++		 * there is no handshake select register to program.
++		 */
++		if (!chip->dw->hdata->use_handshake_as_channel_number)
++			dev_err(chip->dev, "apb_regs not initialized\n");
+ 		return;
+ 	}
+ 

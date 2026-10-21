@@ -1,0 +1,7 @@
+config BR2_PACKAGE_RECAMERA_TESTS
+	bool "recamera-tests (hardware/port check programs)"
+	help
+	  Small check programs of the port, from tests/ of this tree:
+	  recamera-iontest (ION allocator), recamera-ioninfo (ION heap
+	  usage), recamera-fencetso (does fence.tso survive on the C906).
+	  The camera pipeline checks (recamera-vicap) come with sophgo-mpi.

@@ -1,0 +1,22 @@
+#!/bin/sh
+#
+# S04thermal-logger -- run /usr/sbin/thermal-logger (SoC temperature history
+# in /data/recamera/thermal.log, F7 thermal work).
+
+PID=/var/run/thermal-logger.pid
+
+case "$1" in
+	start)
+		printf "Starting thermal logger: "
+		start-stop-daemon -S -b -m -p "$PID" -x /usr/sbin/thermal-logger -- 10 &&
+			echo "OK" || echo "FAIL"
+		;;
+	stop)
+		printf "Stopping thermal logger: "
+		start-stop-daemon -K -q -p "$PID" && echo "OK" || echo "FAIL"
+		;;
+	restart|reload)
+		"$0" stop; "$0" start ;;
+	*)
+		echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

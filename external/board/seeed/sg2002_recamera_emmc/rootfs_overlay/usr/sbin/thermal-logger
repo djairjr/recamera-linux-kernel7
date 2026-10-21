@@ -1,0 +1,30 @@
+#!/bin/sh
+#
+# thermal-logger -- append the SoC temperature to /data/recamera/thermal.log
+# every INTERVAL seconds (default 10), synced line by line so the curve up
+# to a crash or a thermal shutdown survives it. Rotates at ~1 MiB (.1 kept).
+#
+# Line: <epoch> <temp_mC> <load1> <uptime_s> <zone_type>
+
+INTERVAL=${1:-10}
+LOGDIR=/data/recamera
+LOG=$LOGDIR/thermal.log
+ZONE=
+for z in /sys/class/thermal/thermal_zone*; do
+	[ -r "$z/temp" ] && { ZONE=$z; break; }
+done
+[ -n "$ZONE" ] || { echo "thermal-logger: no thermal zone" >&2; exit 1; }
+TYPE=$(cat "$ZONE/type")
+mkdir -p "$LOGDIR"
+
+while :; do
+	t=$(cat "$ZONE/temp" 2>/dev/null)
+	read l1 _ < /proc/loadavg
+	read up _ < /proc/uptime
+	echo "$(date +%s) ${t:-?} $l1 ${up%.*} $TYPE" >> "$LOG"
+	sync "$LOG" 2>/dev/null || sync
+	if [ "$(wc -c < "$LOG")" -gt 1048576 ]; then
+		mv -f "$LOG" "$LOG.1"
+	fi
+	sleep "$INTERVAL"
+done

@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Out-of-tree build of the vendor ION (Android staging ION of the Sophgo 5.10
+# kernel, drivers/staging/android/ion) for Linux 7.2, which no longer has ION.
+# Only what the Sophgo multimedia stack uses: the ION core, the carveout heap
+# and the Cvitek glue (/dev/ion, the cvitek,cvitek-ion platform driver, the
+# cvi_ion_* API used by the osdrv "sys" module, the cache ioctls).
+# Left out: system/CMA/chunk heaps, 32-bit compat, ashmem.
+
+obj-m += cvi_ion.o
+cvi_ion-y := \
+	ion/ion.o \
+	ion/ion_heap.o \
+	ion/ion_carveout_heap.o \
+	ion/cvitek/cvitek_ion.o \
+	ion/cvitek/cvitek_ion_alloc.o \
+	ion/cvitek/cvitek_ion_debugfs.o
+
+# The Kconfig symbols of the vendor tree (drivers/staging/android/ion/Kconfig)
+ccflags-y += -DCONFIG_ION=1 -DCONFIG_ION_CARVEOUT_HEAP=1 -DCONFIG_ION_CVITEK=1
+ccflags-y += -I$(src)/ion -I$(src)/uapi

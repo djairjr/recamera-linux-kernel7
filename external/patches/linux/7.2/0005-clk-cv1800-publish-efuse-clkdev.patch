@@ -1,0 +1,31 @@
+--- a/drivers/clk/sophgo/clk-cv1800.c
++++ b/drivers/clk/sophgo/clk-cv1800.c
+@@ -5,6 +5,8 @@
+ 
+ #include <linux/module.h>
+ #include <linux/clk-provider.h>
++#include <linux/clkdev.h>
++#include <linux/string.h>
+ #include <linux/platform_device.h>
+ #include <linux/io.h>
+ #include <linux/spinlock.h>
+@@ -1505,6 +1508,19 @@
+ 				i, name);
+ 			return ret;
+ 		}
++
++		/*
++		 * Publica um lookup clkdev para os gates do efuse, como o driver de
++		 * clock do fabricante faz para todos os clocks dele
++		 * (clk-cv181x.c: clk_hw_register_clkdev(hw, name, NULL)). Quem
++		 * consome o nome e' a leitura do efuse em
++		 * drivers/net/phy/cvitek.c, que resolve "clk_efuse" e liga o gate
++		 * em volta da leitura. Só esses dois nomes sao publicados: publicar
++		 * todo clock faria lookups por nome passarem a resolver para
++		 * perifericos cujos clocks ja funcionam nesta placa.
++		 */
++		if (!strcmp(name, "clk_efuse") || !strcmp(name, "clk_apb_efuse"))
++			clk_hw_register_clkdev(hw, name, NULL);
+ 	}
+ 
+ 	return devm_of_clk_add_hw_provider(dev, of_clk_hw_onecell_get,

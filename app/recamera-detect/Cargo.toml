@@ -1,0 +1,11 @@
+[package]
+name = "recamera-detect"
+description = "Detection logic of the reCamera: stream coordinates, ROI, target presence (arrival/departure)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

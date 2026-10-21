@@ -1,0 +1,18 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] sensor ov5647: reCamera MIPI lane mapping {2, 0, 3}
+
+diff -ruN a/component/isp/sensor/cv181x/ov_ov5647/ov5647_cmos_param.h b/component/isp/sensor/cv181x/ov_ov5647/ov5647_cmos_param.h
+--- a/component/isp/sensor/cv181x/ov_ov5647/ov5647_cmos_param.h
++++ b/component/isp/sensor/cv181x/ov_ov5647/ov5647_cmos_param.h
+@@ -82,7 +82,10 @@
+ 	.mac_clk = RX_MAC_CLK_400M,
+ 	.mipi_attr = {
+ 		.raw_data_type = RAW_DATA_10BIT,
+-		.lane_id = {0, 1, 2, -1, -1},
++		/* reCamera wiring: clock on physical lane 2, data on lanes 0 and 3
++		 * (what the factory sscma-node sets at run time; /proc/mipi-rx
++		 * LinkId 2,0,3). The vendor {0, 1, 2} gives no frames here. */
++		.lane_id = {2, 0, 3, -1, -1},
+ 		.pn_swap = {0, 0, 0, 0, 0},
+ 		.wdr_mode = CVI_MIPI_WDR_MODE_NONE,
+ 		.dphy = {

@@ -1,0 +1,7 @@
+config BR2_PACKAGE_SOPHGO_MPI
+	bool "sophgo-mpi (Sophgo multimedia userspace: sys, vi, isp)"
+	select BR2_PACKAGE_SOPHGO_OSDRV
+	help
+	  The Sophgo MPI libraries for the SG2002 (vendor cvi_mpi, cv181x):
+	  libsys, libvi, libisp with the closed 3A algorithm objects
+	  (musl build) and libcvi_bin. F7, see docs/multimedia.md.

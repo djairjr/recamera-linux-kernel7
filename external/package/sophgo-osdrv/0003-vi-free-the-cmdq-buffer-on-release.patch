@@ -1,0 +1,42 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] osdrv/vi: free the command queue buffer on release
+
+vi_cmdq_buf (128 KiB of ION) is allocated by VI_SDK_ENABLE_CHN and freed
+only by VI_SDK_DISABLE_CHN. When the last /dev/cvi-vi file is released
+without that ioctl (a killed process), the release stops the VI but keeps
+the buffer, and the next ENABLE_CHN allocates another one over its address:
+128 KiB lost per kill until a reboot (A2, 20/10/2026).
+
+- vi_free_ion_buf() clears the address it freed (no double free);
+- the release frees the buffer after stopping the channel.
+
+diff -ruN a/vi/chip/cv181x/vi.c b/vi/chip/cv181x/vi.c
+--- a/vi/chip/cv181x/vi.c
++++ b/vi/chip/cv181x/vi.c
+@@ -5062,11 +5062,16 @@
+ }
+ #endif
+ 
++/* reCamera: defined below (declared in vi_sdk_layer.h, not included here) */
++int vi_free_ion_buf(struct cvi_vi_dev *dev);
++
+ void _vi_sdk_release(struct cvi_vi_dev *vdev)
+ {
+ 	u8 i = 0;
+ 
+ 	vi_disable_chn(0);
++	/* reCamera: the owner may have died without VI_SDK_DISABLE_CHN */
++	vi_free_ion_buf(vdev);
+ 
+ 	for (i = 0; i < VI_MAX_CHN_NUM; i++) {
+ 		memset(&gViCtx->chnAttr[i], 0, sizeof(VI_CHN_ATTR_S));
+@@ -6182,6 +6187,9 @@
+ 	for (i = 0; i < ISP_PRERAW_VIRT_MAX; i++) {
+ 		if (ctx->isp_pipe_cfg[i].cmdq_buf.phy_addr)
+ 			sys_ion_free(ctx->isp_pipe_cfg[i].cmdq_buf.phy_addr);
++		/* reCamera: freed, not to be freed again (release path) */
++		ctx->isp_pipe_cfg[i].cmdq_buf.phy_addr = 0;
++		ctx->isp_pipe_cfg[i].cmdq_buf.vir_addr = NULL;
+ 	}
+ 
+ 	return ret;

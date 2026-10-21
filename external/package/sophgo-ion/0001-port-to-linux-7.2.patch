@@ -1,0 +1,641 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] ion: port the Sophgo/Cvitek staging ION to Linux 7.2 (out of tree)
+
+Vendor 5.10 drivers/staging/android/ion (core + carveout heap + cvitek
+glue) built as one module, cvi_ion.ko, for a kernel without ION. See the
+"7.2 port" comments.
+diff -ruN a/ion/cvitek/cvitek_ion.c b/ion/cvitek/cvitek_ion.c
+--- a/ion/cvitek/cvitek_ion.c
++++ b/ion/cvitek/cvitek_ion.c
+@@ -9,6 +9,7 @@
+ 
+ #include <linux/err.h>
+ #include <linux/init.h>
++#include <linux/module.h>
+ #include <linux/platform_device.h>
+ #include <linux/of.h>
+ #include <linux/of_platform.h>
+@@ -23,11 +24,15 @@
+ #include <linux/version.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+ #include <linux/dma-map-ops.h>
++#include <linux/dma-mapping.h>
+ #endif
+ 
+ #include "../ion.h"
+ #include "../../uapi/ion_cvitek.h"
+ 
++/* 7.2 port: device for the cache maintenance ioctls (DMA API) */
++static struct device *cvi_ion_dma_dev;
++
+ struct ion_of_heap {
+ 	const char *compat;
+ 	int heap_id;
+@@ -105,13 +110,29 @@
+ {
+ 	int ret = 0;
+ 
++	struct device_node *np;
++	struct reserved_mem *rmem;
++
+ 	switch (heap->type) {
+ 	case ION_HEAP_TYPE_CARVEOUT:
+ 	case ION_HEAP_TYPE_CHUNK:
+ 		if (heap->base && heap->size)
+ 			return 0;
+-	case ION_HEAP_TYPE_DMA:
+-		ret = of_reserved_mem_device_init(heap->priv);
++		/*
++		 * 7.2 port: a module cannot register a RESERVEDMEM_OF_DECLARE
++		 * handler (the vendor "ion-region" hook ran at early boot), so
++		 * look the region up: the kernel reserves any reserved-memory
++		 * node with a size at boot, compatible or not.
++		 */
++		np = of_parse_phandle(heap_node, "memory-region", 0);
++		rmem = np ? of_reserved_mem_lookup(np) : NULL;
++		of_node_put(np);
++		if (!rmem)
++			return -ENODEV;
++		heap->base = rmem->base;
++		heap->size = rmem->size;
++		pr_info("%s: heap %s base %pa size %pa\n", __func__,
++			heap->name, &rmem->base, &rmem->size);
+ 		break;
+ 	default:
+ 		break;
+@@ -120,7 +141,7 @@
+ 	return ret;
+ }
+ 
+-struct ion_platform_data *ion_parse_dt(struct platform_device *pdev,
++static struct ion_platform_data *ion_parse_dt(struct platform_device *pdev,
+ 				       struct ion_of_heap *compatible)
+ {
+ 	int num_heaps, ret;
+@@ -174,7 +195,7 @@
+ 	return data;
+ }
+ 
+-void ion_destroy_platform_data(struct ion_platform_data *data)
++static void ion_destroy_platform_data(struct ion_platform_data *data)
+ {
+ 	int i;
+ 
+@@ -278,7 +299,7 @@
+ }
+ #endif
+ 
+-long cvitek_ion_ioctl(struct ion_device *dev, unsigned int cmd, unsigned long arg)
++static long cvitek_ion_ioctl(struct ion_device *dev, unsigned int cmd, unsigned long arg)
+ {
+ 	long ret = 0;
+ 
+@@ -357,40 +378,46 @@
+ 	case ION_IOC_CVITEK_FLUSH_PHY_RANGE:
+ 	{
+ 		struct cvitek_cache_range data;
+-		unsigned long  va, pa;
+ 
+ 		if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
+ 			return -EFAULT;
+ 
+-		pr_debug("flush addr %#llx, size %zu\n", data.paddr, data.size);
++		pr_debug("flush addr %#llx, size %u\n", data.paddr, data.size);
+ 
+-#if defined(__arm__) || defined(__aarch64__)
+-		/* compatible with previous version */
+-		/* it could be removed and replaced by arch_sync_dma_for_device later */
+-		__dma_map_area(phys_to_virt(data.paddr), data.size, DMA_TO_DEVICE);
+-#else
+-		arch_sync_dma_for_device(data.paddr, data.size, DMA_TO_DEVICE);
+-#endif
++		/*
++		 * 7.2 port: arch_sync_dma_for_device() is not exported; the DMA
++		 * API reaches it for this non-coherent device (sg2002.dtsi soc:
++		 * dma-noncoherent; no IOMMU, so dma address == physical).
++		 */
++		if (!cvi_ion_dma_dev)
++			return -ENODEV;
++		dma_sync_single_for_device(cvi_ion_dma_dev, (dma_addr_t)data.paddr,
++					   data.size, DMA_TO_DEVICE);
+ 		break;
+ 	}
+ 	case ION_IOC_CVITEK_INVALIDATE_PHY_RANGE:
+ 	{
+ 		struct cvitek_cache_range data;
+-		unsigned long  va, pa;
+ 
+ 		if (copy_from_user(&data, (void __user *)arg, sizeof(data)))
+ 			return -EFAULT;
+ 
+-		pr_debug("invalidate addr %#llx, size %zu\n", data.paddr, data.size);
++		pr_debug("invalidate addr %#llx, size %u\n", data.paddr, data.size);
+ 
+ 
+-#if defined(__arm__) || defined(__aarch64__)
+-		/* compatible with previous version */
+-		/* it could be removed and replaced by arch_sync_dma_for_device later */
+-		__dma_map_area(phys_to_virt(data.paddr), data.size, DMA_FROM_DEVICE);
+-#else
+-		arch_sync_dma_for_device(data.paddr, data.size, DMA_FROM_DEVICE);
+-#endif
++		/*
++		 * 7.2 port: arch_sync_dma_for_device() is not exported; the DMA
++		 * API reaches it for this non-coherent device (sg2002.dtsi soc:
++		 * dma-noncoherent; no IOMMU, so dma address == physical).
++		 */
++		if (!cvi_ion_dma_dev)
++			return -ENODEV;
++		/*
++		 * The invalidate itself is for_cpu: on 7.2 riscv,
++		 * for_device(FROM_DEVICE) only cleans the lines.
++		 */
++		dma_sync_single_for_cpu(cvi_ion_dma_dev, (dma_addr_t)data.paddr,
++					data.size, DMA_FROM_DEVICE);
+ 		break;
+ 	}
+ 	default:
+@@ -414,6 +441,11 @@
+ 	}
+ 	platform_set_drvdata(pdev, ipdev);
+ 
++	ret = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(64));
++	if (ret)
++		goto out;
++	cvi_ion_dma_dev = &pdev->dev;
++
+ 	ipdev->plat_data = ion_parse_dt(pdev, cvi_ion_heap_list);
+ 	if (IS_ERR(ipdev->plat_data)) {
+ 		ret = PTR_ERR(ipdev->plat_data);
+@@ -492,15 +524,14 @@
+ 	return ret;
+ }
+ 
+-static int cvitek_ion_remove(struct platform_device *pdev)
++/* 7.2 port: remove() returns void; ipdev->heaps is devm memory (the
++ * vendor kfree() of it was a latent double free, never hit built in) */
++static void cvitek_ion_remove(struct platform_device *pdev)
+ {
+ 	struct cvi_ion_dev *ipdev;
+ 
+ 	ipdev = platform_get_drvdata(pdev);
+-	kfree(ipdev->heaps);
+ 	ion_destroy_platform_data(ipdev->plat_data);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id cvitek_ion_match_table[] = {
+@@ -514,56 +545,29 @@
+ 	.driver = {
+ 		.name = "ion-cvitek",
+ 		.of_match_table = cvitek_ion_match_table,
++		/* the ION device lives as long as the module: no unbind */
++		.suppress_bind_attrs = true,
+ 	},
+ };
+ 
++/*
++ * 7.2 port: built as a module, so one init does what the two vendor
++ * subsys_initcalls did (ion_device_create in ion.c, then the platform
++ * driver). No module_exit: /dev/ion and the heaps stay until reboot, as
++ * they did built in, and the module cannot be unloaded under live buffers.
++ */
+ static int __init cvitek_ion_init(void)
+ {
+-	return platform_driver_register(&cvitek_ion_driver);
+-}
+-
+-subsys_initcall(cvitek_ion_init);
++	int ret = ion_device_create();
+ 
+-#ifdef CONFIG_OF_RESERVED_MEM
+-#include <linux/of.h>
+-#include <linux/of_fdt.h>
+-#include <linux/of_reserved_mem.h>
+-
+-static int rmem_ion_device_init(struct reserved_mem *rmem, struct device *dev)
+-{
+-	struct platform_device *pdev = to_platform_device(dev);
+-	struct ion_platform_heap *heap = pdev->dev.platform_data;
+-
+-	heap->base = rmem->base;
+-	heap->size = rmem->size;
+-	pr_info("%s: heap %s base %pa size %pa dev %p\n", __func__,
+-		heap->name, &rmem->base, &rmem->size, dev);
+-	return 0;
+-}
+-
+-static void rmem_ion_device_release(struct reserved_mem *rmem,
+-				    struct device *dev)
+-{
++	if (ret)
++		return ret;
++	return platform_driver_register(&cvitek_ion_driver);
+ }
++module_init(cvitek_ion_init);
+ 
+-static const struct reserved_mem_ops rmem_dma_ops = {
+-	.device_init	= rmem_ion_device_init,
+-	.device_release	= rmem_ion_device_release,
+-};
+-
+-static int __init rmem_ion_setup(struct reserved_mem *rmem)
+-{
+-	phys_addr_t size = rmem->size;
+-
+-	size = size / 1024 / 1024;
++MODULE_DESCRIPTION("Cvitek/Sophgo ION memory allocator (vendor 5.10 staging ION, ported to 7.2)");
++MODULE_LICENSE("GPL");
+ 
+-	pr_info("Ion memory setup at %pa size %ld MiB\n",
+-		&rmem->base, (unsigned long)size);
+-	rmem->ops = &rmem_dma_ops;
+-	return 0;
+-}
+-
+-RESERVEDMEM_OF_DECLARE(vpp, "vpp-region", rmem_ion_setup);
+-RESERVEDMEM_OF_DECLARE(npu, "npu-region", rmem_ion_setup);
+-RESERVEDMEM_OF_DECLARE(ion, "ion-region", rmem_ion_setup);
+-#endif
++/* 7.2 port: the vendor RESERVEDMEM_OF_DECLARE("ion-region") hook is replaced
++ * by the of_reserved_mem_lookup() in ion_setup_heap_common() */
+diff -ruN a/ion/cvitek/cvitek_ion_alloc.c b/ion/cvitek/cvitek_ion_alloc.c
+--- a/ion/cvitek/cvitek_ion_alloc.c
++++ b/ion/cvitek/cvitek_ion_alloc.c
+@@ -19,7 +19,7 @@
+ 	struct ion_buffer *buf;
+ };
+ 
+-int _cvi_ion_alloc(enum ion_heap_type type, size_t len, bool mmap_cache, struct cvi_ion_alloc_info *ion_alloc_info)
++static int _cvi_ion_alloc(enum ion_heap_type type, size_t len, bool mmap_cache, struct cvi_ion_alloc_info *ion_alloc_info)
+ {
+ 	struct ion_heap_query query;
+ 	int ret = 0, index;
+@@ -39,19 +39,10 @@
+ 		 __func__, len, type,
+ 		 (mmap_cache) ? "cacheable" : "un-cacheable");
+ 
+-#if defined(__arm__) || defined(__aarch64__)
+-	set_fs(KERNEL_DS);
+-#else
+-	mm_segment_t old_fs = force_uaccess_begin();
+-#endif
++	/* 7.2 port: no set_fs/force_uaccess any more; the second argument
++	 * already tells ion_query_heaps() that query.heaps is a kernel pointer */
+ 	ret = ion_query_heaps(&query, true);
+ 
+-#if defined(__arm__) || defined(__aarch64__)
+-	set_fs(old_fs);
+-#else
+-	force_uaccess_end(old_fs);
+-#endif
+-
+ 	if (ret != 0)
+ 		return ret;
+ 
+diff -ruN a/ion/cvitek/cvitek_ion_debugfs.c b/ion/cvitek/cvitek_ion_debugfs.c
+--- a/ion/cvitek/cvitek_ion_debugfs.c
++++ b/ion/cvitek/cvitek_ion_debugfs.c
+@@ -22,7 +22,7 @@
+ 	return chunk->end_addr - chunk->start_addr + 1;
+ }
+ 
+-void show_bitmap_mem_usage(struct seq_file *s, u32 heap_id, struct gen_pool_chunk *chunk, u32 size_in_bit, int order)
++static void show_bitmap_mem_usage(struct seq_file *s, u32 heap_id, struct gen_pool_chunk *chunk, u32 size_in_bit, int order)
+ {
+ 	unsigned long *map = chunk->bits;
+ 	phys_addr_t region_start_addr;
+@@ -55,7 +55,7 @@
+ 
+ }
+ 
+-void show_carveout_heap_usage(struct seq_file *s, struct ion_heap *heap)
++static void show_carveout_heap_usage(struct seq_file *s, struct ion_heap *heap)
+ {
+ 	int end_bit;
+ 	struct gen_pool *pool;
+@@ -209,7 +209,7 @@
+ 	if (!debug_file) {
+ 		char buf[256], *path;
+ 
+-		path = dentry_path(dev->debug_root, buf, 256);
++		path = dentry_path_raw(dev->debug_root, buf, 256);
+ 		pr_err("Failed to create heap debugfs at %s/%s\n",
+ 			   path, debug_heap_name);
+ 	}
+@@ -219,7 +219,7 @@
+ 	if (!debug_file) {
+ 		char buf[256], *path;
+ 
+-		path = dentry_path(heap->heap_dfs_root, buf, 256);
++		path = dentry_path_raw(heap->heap_dfs_root, buf, 256);
+ 		pr_err("Failed to create clear_peak heap debugfs at %s/%s\n",
+ 			   path, debug_heap_name);
+ 	}
+@@ -231,7 +231,7 @@
+ 	if (!debug_file) {
+ 		char buf[256], *path;
+ 
+-		path = dentry_path(heap->heap_dfs_root, buf, 256);
++		path = dentry_path_raw(heap->heap_dfs_root, buf, 256);
+ 		pr_err("Failed to create ava_mem heap debugfs at %s/%s\n",
+ 			   path, debug_heap_name);
+ 	}
+@@ -242,7 +242,7 @@
+ 	if (!debug_file) {
+ 		char buf[256], *path;
+ 
+-		path = dentry_path(heap->heap_dfs_root, buf, 256);
++		path = dentry_path_raw(heap->heap_dfs_root, buf, 256);
+ 		pr_err("Failed to create all_mem heap debugfs at %s/%s\n",
+ 			   path, debug_heap_name);
+ 	}
+diff -ruN a/ion/ion.c b/ion/ion.c
+--- a/ion/ion.c
++++ b/ion/ion.c
+@@ -24,15 +24,64 @@
+ #include <linux/uaccess.h>
+ #include <linux/vmalloc.h>
+ #include <linux/genalloc.h>
+-#include <trace/events/kmem.h>
++#include <linux/plist.h>
++#include <linux/string.h>
++#include <linux/file.h>
++#include <linux/fdtable.h>
++#include <linux/iosys-map.h>
++#include <linux/module.h>
++
++/* 7.2 port: the vendor kernel added these two events to trace/events/kmem.h */
++#define trace_ion_heap_grow(name, len, total)	do { } while (0)
++#define trace_ion_heap_shrink(name, len, total)	do { } while (0)
++
++MODULE_IMPORT_NS("DMA_BUF");	/* 7.2: dma_buf_export/fd/put are namespaced */
++
++/*
++ * 7.2 port: plist_add() is not exported to modules; a copy of
++ * lib/plist.c:plist_add() without the debug checks.
++ */
++static void ion_plist_add(struct plist_node *node, struct plist_head *head)
++{
++	struct plist_node *first, *iter, *prev = NULL, *last, *reverse_iter;
++	struct list_head *node_next = &head->node_list;
++
++	if (plist_head_empty(head))
++		goto ins_node;
++
++	first = iter = plist_first(head);
++	last = reverse_iter = list_entry(first->prio_list.prev, struct plist_node, prio_list);
++
++	do {
++		if (node->prio < iter->prio) {
++			node_next = &iter->node_list;
++			break;
++		} else if (node->prio >= reverse_iter->prio) {
++			prev = reverse_iter;
++			iter = list_entry(reverse_iter->prio_list.next,
++				struct plist_node, prio_list);
++			if (likely(reverse_iter != last))
++				node_next = &iter->node_list;
++			break;
++		}
++
++		prev = iter;
++		iter = list_entry(iter->prio_list.next,
++				struct plist_node, prio_list);
++		reverse_iter = list_entry(reverse_iter->prio_list.prev,
++				struct plist_node, prio_list);
++	} while (iter != first);
++
++	if (!prev || prev->prio != node->prio)
++		list_add_tail(&node->prio_list, &iter->prio_list);
++ins_node:
++	list_add_tail(&node->node_list, node_next);
++}
+ #ifdef CONFIG_COMPAT
+ #include "compat_ion.h"
+ #endif
+ 
+ #include "ion.h"
+-#ifdef CONFIG_ION_CVITEK
+-extern void cvi_ion_create_debug_info(struct ion_heap *heap);
+-#endif
+ static struct ion_device *internal_dev;
+ static int heap_id;
+ 
+@@ -332,14 +381,18 @@
+ 	_ion_buffer_destroy(buffer);
+ }
+ 
+-static void *ion_dma_buf_vmap(struct dma_buf *dmabuf)
++/* 7.2 port: dma_buf_ops vmap/vunmap take a struct iosys_map */
++static int ion_dma_buf_vmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ 	struct ion_buffer *buffer = dmabuf->priv;
+ 
+-	return buffer->vaddr;
++	if (!buffer->vaddr)
++		return -ENOMEM;
++	iosys_map_set_vaddr(map, buffer->vaddr);
++	return 0;
+ }
+ 
+-static void ion_dma_buf_vunmap(struct dma_buf *dmabuf, void *ptr)
++static void ion_dma_buf_vunmap(struct dma_buf *dmabuf, struct iosys_map *map)
+ {
+ }
+ 
+@@ -589,7 +642,7 @@
+ 		end_bit = chunk_size >> order;
+ 		ret = __update_max_avail_size(chunk, end_bit, order, max_avail_size);
+ 		if (ret) {
+-			pr_err("%s: update max avail size fail, chunk addr:%llu ret:%d.\n",
++			pr_err("%s: update max avail size fail, chunk addr:%lu ret:%d.\n",
+ 				__func__, chunk->start_addr, ret);
+ 		}
+ 	}
+@@ -698,7 +751,7 @@
+ 
+ 	plist_for_each_entry(heap, &dev->heaps, node) {
+ 		if(heap->name)
+-			strncpy(hdata.name, heap->name, MAX_HEAP_NAME);
++			strscpy(hdata.name, heap->name, sizeof(hdata.name));	/* 7.2: no strncpy */
+ 		hdata.name[sizeof(hdata.name) - 1] = '\0';
+ 		hdata.type = heap->type;
+ 		hdata.heap_id = heap->id;
+@@ -796,7 +849,7 @@
+ 		data.allocation.fd = fd;
+ #ifdef CONFIG_ION_CVITEK
+ 		data.allocation.paddr = buffer->paddr;
+-		strncpy(name, data.allocation.name, MAX_ION_BUFFER_NAME);
++		strscpy(name, data.allocation.name, MAX_ION_BUFFER_NAME);	/* 7.2: no strncpy */
+ 		buffer->name = name;
+ #endif
+ 		break;
+@@ -858,11 +911,11 @@
+ 	sc.nr_to_scan = val;
+ 
+ 	if (!val) {
+-		objs = heap->shrinker.count_objects(&heap->shrinker, &sc);
++		objs = heap->shrinker->count_objects(heap->shrinker, &sc);
+ 		sc.nr_to_scan = objs;
+ 	}
+ 
+-	heap->shrinker.scan_objects(&heap->shrinker, &sc);
++	heap->shrinker->scan_objects(heap->shrinker, &sc);
+ 	return 0;
+ }
+ 
+@@ -875,7 +928,7 @@
+ 	sc.gfp_mask = GFP_HIGHUSER;
+ 	sc.nr_to_scan = 0;
+ 
+-	objs = heap->shrinker.count_objects(&heap->shrinker, &sc);
++	objs = heap->shrinker->count_objects(heap->shrinker, &sc);
+ 	*val = objs;
+ 	return 0;
+ }
+@@ -925,8 +978,8 @@
+ 			   heap_root,
+ 			   &heap->alloc_bytes_wm);
+ 
+-	if (heap->shrinker.count_objects &&
+-	    heap->shrinker.scan_objects) {
++	if (heap->shrinker && heap->shrinker->count_objects &&
++	    heap->shrinker->scan_objects) {
+ 		snprintf(debug_name, 64, "%s_shrink", heap->name);
+ 		debugfs_create_file(debug_name,
+ 				    0644,
+@@ -942,7 +995,7 @@
+ 	 * the list later attempt higher id numbers first
+ 	 */
+ 	plist_node_init(&heap->node, -heap->id);
+-	plist_add(&heap->node, &dev->heaps);
++	ion_plist_add(&heap->node, &dev->heaps);
+ #ifdef CONFIG_ION_CVITEK
+ 	cvi_ion_create_debug_info(heap);
+ #endif
+@@ -952,7 +1005,7 @@
+ }
+ EXPORT_SYMBOL(ion_device_add_heap);
+ 
+-static int ion_device_create(void)
++int ion_device_create(void)
+ {
+ 	struct ion_device *idev;
+ 	int ret;
+@@ -980,12 +1033,12 @@
+ 	internal_dev = idev;
+ 	return 0;
+ }
+-subsys_initcall(ion_device_create);
++/* 7.2 port: called by the module init (cvitek_ion.c), no initcall of its own */
+ #ifdef CONFIG_ION_CVITEK
+ #include <linux/syscalls.h>
+ void ion_free(pid_t pid, int fd)
+ {
+-	ksys_close(fd);
++	close_fd(fd);	/* 7.2: ksys_close() is gone */
+ }
+ EXPORT_SYMBOL(ion_free);
+ #endif
+diff -ruN a/ion/ion.h b/ion/ion.h
+--- a/ion/ion.h
++++ b/ion/ion.h
+@@ -16,6 +16,8 @@
+ #include <linux/rbtree.h>
+ #include <linux/sched.h>
+ #include <linux/shrinker.h>
++#include <linux/plist.h>
++#include <linux/string.h>
+ #include <linux/types.h>
+ #include <linux/miscdevice.h>
+ 
+@@ -182,7 +184,7 @@
+ 	const char *name;
+ 
+ 	/* deferred free support */
+-	struct shrinker shrinker;
++	struct shrinker *shrinker;	/* 7.2: shrinker_alloc() */
+ 	struct list_head free_list;
+ 	size_t free_list_size;
+ 	spinlock_t free_lock;
+@@ -238,6 +240,10 @@
+  */
+ int ion_heap_init_shrinker(struct ion_heap *heap);
+ 
++/* 7.2 port: prototypes of functions shared between the module's files */
++int ion_device_create(void);
++void cvi_ion_create_debug_info(struct ion_heap *heap);
++
+ /**
+  * ion_heap_init_deferred_free -- initialize deferred free functionality
+  * @heap:		the heap
+diff -ruN a/ion/ion_carveout_heap.c b/ion/ion_carveout_heap.c
+--- a/ion/ion_carveout_heap.c
++++ b/ion/ion_carveout_heap.c
+@@ -114,7 +114,7 @@
+ };
+ 
+ #ifdef CONFIG_ION_CVITEK
+-void cvi_get_rtos_ion_size(size_t *psize)
++static void cvi_get_rtos_ion_size(size_t *psize)
+ {
+ 	struct device_node * np;
+ 	u32 rtos_ion_size;
+@@ -148,8 +148,6 @@
+ struct ion_heap *ion_carveout_heap_create(struct ion_platform_heap *heap_data)
+ {
+ 	struct ion_carveout_heap *carveout_heap;
+-	int ret;
+-
+ 	struct page *page;
+ 	size_t size;
+ #ifdef CONFIG_ION_CVITEK
+diff -ruN a/ion/ion_heap.c b/ion/ion_heap.c
+--- a/ion/ion_heap.c
++++ b/ion/ion_heap.c
+@@ -275,8 +275,7 @@
+ static unsigned long ion_heap_shrink_count(struct shrinker *shrinker,
+ 					   struct shrink_control *sc)
+ {
+-	struct ion_heap *heap = container_of(shrinker, struct ion_heap,
+-					     shrinker);
++	struct ion_heap *heap = shrinker->private_data;
+ 	int total = 0;
+ 
+ 	total = ion_heap_freelist_size(heap) / PAGE_SIZE;
+@@ -290,8 +289,7 @@
+ static unsigned long ion_heap_shrink_scan(struct shrinker *shrinker,
+ 					  struct shrink_control *sc)
+ {
+-	struct ion_heap *heap = container_of(shrinker, struct ion_heap,
+-					     shrinker);
++	struct ion_heap *heap = shrinker->private_data;
+ 	int freed = 0;
+ 	int to_scan = sc->nr_to_scan;
+ 
+@@ -316,12 +314,18 @@
+ 	return freed;
+ }
+ 
++/* 7.2 port: shrinkers are allocated (shrinker_alloc/shrinker_register) */
+ int ion_heap_init_shrinker(struct ion_heap *heap)
+ {
+-	heap->shrinker.count_objects = ion_heap_shrink_count;
+-	heap->shrinker.scan_objects = ion_heap_shrink_scan;
+-	heap->shrinker.seeks = DEFAULT_SEEKS;
+-	heap->shrinker.batch = 0;
++	heap->shrinker = shrinker_alloc(0, "ion-%s", heap->name);
++	if (!heap->shrinker)
++		return -ENOMEM;
++	heap->shrinker->count_objects = ion_heap_shrink_count;
++	heap->shrinker->scan_objects = ion_heap_shrink_scan;
++	heap->shrinker->seeks = DEFAULT_SEEKS;
++	heap->shrinker->batch = 0;
++	heap->shrinker->private_data = heap;
++	shrinker_register(heap->shrinker);
+ 
+-	return register_shrinker(&heap->shrinker);
++	return 0;
+ }

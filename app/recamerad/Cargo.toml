@@ -1,0 +1,42 @@
+[package]
+name = "recamerad"
+description = "reCamera daemon: camera, detection, streaming and configuration"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Network side on one thread (docs/application.md §1): only what is used.
+tokio = { version = "1", default-features = false, features = ["rt", "macros", "signal", "time", "net", "io-util", "io-std", "sync", "process"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+lexopt = "0.3"
+libc = "0.2"
+sophgo = { path = "../sophgo" }
+recamera-detect = { path = "../recamera-detect" }
+recamera-rtsp = { path = "../recamera-rtsp" }
+# Web page and streams (stage A5): HTTP/1 only, on the network thread.
+hyper = { version = "1", default-features = false, features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http-body-util = "0.1"
+bytes = "1"
+# WebRTC (stage A7, WHEP), feature "webrtc": DTLS/SRTP and the certificate by
+# the OpenSSL 3 the image already has (libssl.so.3), linked dynamically; the
+# "rust-crypto" backend still pulls aws-lc (C, cmake) through dimpl/rcgen
+str0m = { version = "0.24", default-features = false, features = ["openssl"], optional = true }
+
+# MQTT + Home Assistant (stage A9): TLS by the image's OpenSSL, no rustls
+rumqttc = { version = "0.25", default-features = false, features = ["use-native-tls"] }
+# LLM (stage A8b, HTTPS client by hyper) and the terminal (A8c, WebSocket):
+# the same native-tls (OpenSSL) as MQTT
+native-tls = "0.2"
+tokio-native-tls = "0.3"
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "handshake", "native-tls"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+base64 = "0.22"
+
+[features]
+default = ["webrtc"]
+webrtc = ["dep:str0m"]

@@ -1,0 +1,7 @@
+config BR2_PACKAGE_MORSE_CLI
+	bool "morse-cli (morse_cli)"
+	select BR2_PACKAGE_LIBNL
+	select BR2_PACKAGE_LIBUSB
+	help
+	  Morse Micro HaLow control tool, upstream release 1.14.1
+	  (github.com/MorseMicro/morse_cli), the release of the driver.

@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# S70halow -- optional Wi-Fi HaLow (802.11ah) module: Morse Micro MM6108
+# ("fgh100m" add-on) as an SDIO card in the SD slot.
+#
+# Vendor sequence (factory SD 0.2.4):
+#   /mnt/system/ko/loadsystemko.sh
+#     country from /etc/recamera.conf/halow_country (created as "US")
+#     insmod dot11ah.ko; insmod mac80211.ko; init_sd_pin (SD0 pads -> SDIO)
+#     insmod morse.ko country=$COUNTRY
+#     [ -e /dev/morse_io ] && insmod kfifo_buf, industrialio-triggered-buffer,
+#                             ti-ads1015          (the kit's ADC on i2c1 0x48)
+#   /etc/init.d/S70hardware setup_halow0: rename the HaLow netdev to halow0, up
+#   wpa_supplicant_s1g -c /etc/wpa_supplicant_s1g.conf for HaLow links.
+#
+# Here: the SD0 pads are muxed by the DT (sdhci0_cfg) and the module's reset
+# line comes from the DT child mm610x-sdio@2 (reset-gpios <&portc 12>).
+# Difference from the vendor, on purpose: the modules are loaded only when a
+# Morse SDIO card (vendor 0x325b) is present, instead of on every boot.
+
+CONF_DIR=/etc/recamera.conf
+CONF_COUNTRY=$CONF_DIR/halow_country
+MORSE_SDIO_VENDOR=0x325b
+
+morse_present() {
+	for v in /sys/bus/sdio/devices/*/vendor; do
+		[ -f "$v" ] && [ "$(cat "$v")" = "$MORSE_SDIO_VENDOR" ] && return 0
+	done
+	return 1
+}
+
+halow_netdev() {
+	for n in /sys/class/net/*; do
+		drv=$(readlink "$n/device/driver" 2>/dev/null)
+		case "$drv" in
+			*morse*) basename "$n"; return 0 ;;
+		esac
+	done
+	return 1
+}
+
+start() {
+	printf "Starting HaLow (Morse MM610x): "
+	if ! morse_present; then
+		echo "no module in the SD slot, skipped"
+		return 0
+	fi
+
+	mkdir -p "$CONF_DIR"
+	[ -s "$CONF_COUNTRY" ] || echo "US" > "$CONF_COUNTRY"
+	COUNTRY=$(cat "$CONF_COUNTRY")
+
+	modprobe dot11ah && modprobe morse country="$COUNTRY" ||
+		{ echo "FAIL (modprobe)"; return 1; }
+
+	i=0
+	while [ ! -e /dev/morse_io ] && [ $i -lt 20 ]; do
+		sleep 0.25; i=$((i + 1))
+	done
+	[ -e /dev/morse_io ] && modprobe ti-ads1015
+
+	IF=$(halow_netdev)
+	if [ -n "$IF" ] && [ "$IF" != halow0 ]; then
+		ip link set "$IF" down
+		ip link set "$IF" name halow0
+	fi
+	ip link set halow0 up 2>/dev/null
+	echo "OK (country $COUNTRY, $(ls /sys/class/net | grep -c halow0) halow0)"
+}
+
+stop() {
+	printf "Stopping HaLow: "
+	ip link set halow0 down 2>/dev/null
+	modprobe -r ti-ads1015 morse dot11ah 2>/dev/null
+	echo "OK"
+}
+
+case "$1" in
+	start) start ;;
+	stop) stop ;;
+	restart|reload) stop; start ;;
+	*) echo "Usage: $0 {start|stop|restart}"; exit 1 ;;
+esac

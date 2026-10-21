@@ -1,0 +1,63 @@
+/dts-v1/;
+
+/* Boot FIT for the Seeed reCamera (SG2002).
+ *
+ * The vendor U-Boot in the eMMC boot0 reads this image from the BOOT partition
+ * and boots it with `bootm <addr>#config-sg2002_recamera_emmc' (the configuration
+ * name is CVICHIP "_" CVIBOARD, i.e. "sg2002_recamera_emmc": see the board header
+ * include/configs/cv181x-asic.h:200 and META/misc_info.txt of the official image).
+ *
+ * Keep in sync with the kernel build: CONFIG_KERNEL_ENTRY_HACK_ADDR of the vendor
+ * SDK is 0x80200000, which is where the vendor U-Boot relocates the kernel.
+ *
+ * The kernel is gzip-compressed (Image.gz, compression = "gzip"): the BOOT partition
+ * is 8192 KB and the raw Image is ~9 MB. The vendor build does the same
+ * (build/Makefile: `${KERNEL_COMPRESS} -c -9 -f -k Image > Image.${KERNEL_COMPRESS}`
+ * with KERNEL_GZIP as the default of the "Kernel Image compress algorithm" choice).
+ *
+ * No hash-N nodes: the mkimage that Buildroot builds for the host receives only
+ * CONFIG_FIT and CONFIG_MKIMAGE_DTC_PATH, so NO hash algorithm is enabled — measured
+ * here, a `hash-1 { algo = "sha256"; }` and a `hash-1 { algo = "crc32"; }` both abort
+ * with "Unsupported hash algorithm (...) for 'hash-1' hash node in 'kernel' image node"
+ * / "Can't add hashes to FIT blob: -93"; with no hash node at all the FIT is built and
+ * boots. The u-boot template "Single kernel and FDT blob"
+ * (docs.u-boot.org/en/latest/usage/fit/kernel_fdt.html) does carry crc32 + sha256, but
+ * this host mkimage cannot compute them. For integrity: enable
+ * BR2_PACKAGE_HOST_UBOOT_TOOLS_FIT_SIGNATURE_SUPPORT (uboot-tools.mk:148-150 adds
+ * CONFIG_TOOLS_LIBCRYPTO=y to host-uboot-tools) and then add a sha256 hash node.
+ */
+/ {
+	description = "reCamera (SG2002) kernel";
+	#address-cells = <1>;
+
+	images {
+		kernel {
+			description = "Linux 7.2 Image (gzip)";
+			data = /incbin/("Image.gz");
+			type = "kernel";
+			arch = "riscv";
+			os = "linux";
+			compression = "gzip";
+			load = <0x80200000>;
+			entry = <0x80200000>;
+		};
+
+		fdt {
+			description = "sg2002-recamera device tree";
+			data = /incbin/("sg2002-recamera.dtb");
+			type = "flat_dt";
+			arch = "riscv";
+			compression = "none";
+		};
+	};
+
+	configurations {
+		default = "config-sg2002_recamera_emmc";
+
+		config-sg2002_recamera_emmc {
+			description = "Seeed reCamera (SG2002, eMMC)";
+			kernel = "kernel";
+			fdt = "fdt";
+		};
+	};
+};

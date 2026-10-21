@@ -1,0 +1,31 @@
+# Root filesystem overlay for the reCamera (SG2002)
+
+Everything placed here is copied over the target root filesystem by Buildroot
+(BR2_ROOTFS_OVERLAY).  Keep the paths exactly as they have to appear on the
+target: a file for /etc/foo goes in etc/foo.
+
+The vendor tree carries the equivalent content in
+buildroot-2021.05/board/cvitek/cv181x/overlay (its system libraries, fw_vcodec,
+...); those files are ported here phase by phase, never copied blindly.
+
+## Contents and provenance (F6)
+
+- `lib/firmware/brcm/brcmfmac43012-sdio.*` -- WiFi firmware/NVRAM/CLM of the CYW43012,
+  identical to the vendor overlay (`external/buildroot/board/cvitek/CV181X/overlay`).
+- `lib/firmware/brcm/CYW43012C0_003.001.015.0196.0269.hcd` -- Bluetooth patch RAM of the
+  CYW43012 (md5 1fbf3d8fbac8ddf4ea31e17f9d7357a3), taken from the factory rootfs
+  (`/usr/lib/firmware/brcm/`, sd_compat 0.2.4), which installs it from the vendor package
+  `bt-init` (Seeed-Studio/sscma-example-sg200x, solutions/brcm-patchram-plus/rootfs).
+- `etc/init.d/S41bt-hci` -- BT bring-up (patchram + hciattach + hciconfig), vendor sequence.
+- `etc/init.d/S45usbnet` + `etc/udhcpd-usb0.conf` -- NCM gadget on USB-C, usb0 192.168.42.1,
+  DHCP 192.168.42.10-242 (vendor usb-net.sh / dnsmasq usb_only.conf).
+- `etc/init.d/S00timestamp`, `usr/sbin/timesync-now`, `usr/share/udhcpc/default.script.d/50-timesync` --
+  clock without RTC battery: restore last known time at boot; step the clock with `ntpd -gq` the
+  moment any interface gets a DHCP lease, then keep `ntpd` running; save the time after each sync
+  and at shutdown (`/data/recamera/timestamp` on the eMMC, `/var/lib/timestamp` from the SD). Logs: `/var/log/timesync.log`.
+- `etc/init.d/S42eth-downshift` -- eth0 falls back to 10 Mbit/s (ethtool advertise 0x003) when 100 Mbit/s
+  flaps without RX (vendor GPIO->RJ45 adapter cannot carry 100BASE-TX, measured 2026-10-18); advertising
+  goes back to 10/100 after the cable is unplugged for 10 s. Log: /var/log/eth-downshift.log.
+- `lib/firmware/morse/{mm6108.bin,bcf_default.bin}` -- HaLow firmware/board config, identical to the vendor overlay
+  and the factory rootfs. `etc/init.d/S70halow` -- vendor loadsystemko/S70hardware HaLow sequence (country file,
+  dot11ah + morse, ti-ads1015, halow0), run only when a Morse SDIO card (0x325b) is in the SD slot.

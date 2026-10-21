@@ -1,0 +1,33 @@
+# /etc/network/interfaces -- reCamera (SG2002), our port
+#
+# Consumed by /etc/init.d/S40network, which runs `ifup -a` at boot.
+#
+# The eth0 stanza mirrors the vendor system: there dhcpcd brings the wired
+# interface up and takes a DHCP lease automatically -- dhcpcd.conf only denies
+# can0 and pins usb0 (192.168.42.1) and wlan1 (192.168.16.1), so eth0 is the
+# default DHCP interface and needs no entry of its own.  We ship busybox
+# ifup/udhcpc instead of dhcpcd, so the lease has to be asked for here.
+#
+# Kernel side of this interface is measured working: eth0 up, PHY CVITEK
+# CV182XA attached at stmmac-0:00 (phy_id 0x00435649), no carrier without a
+# link partner.
+
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+
+# wlan0 -- onboard CYW43012 over SDIO (mmc2 at 4320000.mmc).
+# Command mirrored from the system that works (factory SD):
+#     wpa_supplicant -B -i wlan0 -D nl80211 -c <conf>
+# The networks set on the web page (A10) are kept in
+# /data/recamera/wpa_supplicant.conf, out of the per-slot rootfs: copied to
+# /etc before wpa_supplicant starts (the image's file seeds it the first
+# time), copied back by recamerad after every change. wpa_supplicant itself
+# reads /etc: run straight from /data the association at boot took minutes
+# (2 boots of 2, 25 s from /etc; docs/hardware.md).
+auto wlan0
+iface wlan0 inet dhcp
+    pre-up mkdir -p /var/run/wpa_supplicant /data/recamera && if [ -s /data/recamera/wpa_supplicant.conf ]; then cp /data/recamera/wpa_supplicant.conf /etc/wpa_supplicant.conf; else cp /etc/wpa_supplicant.conf /data/recamera/wpa_supplicant.conf; fi && chmod 600 /etc/wpa_supplicant.conf /data/recamera/wpa_supplicant.conf && wpa_supplicant -B -i wlan0 -D nl80211 -c /etc/wpa_supplicant.conf
+    post-down killall -q wpa_supplicant

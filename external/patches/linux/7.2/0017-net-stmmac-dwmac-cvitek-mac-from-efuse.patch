@@ -1,0 +1,91 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] net: stmmac: dwmac-cvitek: take the MAC from the efuse
+
+The board MAC is in the SoC efuse (shadow 0x40/0x44). The vendor U-Boot
+only reads it when "cvi_otp" has been run; otherwise it makes up a random
+locally administered MAC and passes it through the DT, so the vendor
+kernel and this one got a new MAC at every boot. When the DT gives no
+valid MAC, or a locally administered one, use the efuse MAC (if valid),
+with the efuse clock enabled around the access.
+
+diff --color -ruN a/drivers/net/ethernet/stmicro/stmmac/dwmac-cvitek.c b/drivers/net/ethernet/stmicro/stmmac/dwmac-cvitek.c
+--- a/drivers/net/ethernet/stmicro/stmmac/dwmac-cvitek.c	2026-10-18 14:22:12.039594935 -0300
++++ b/drivers/net/ethernet/stmicro/stmmac/dwmac-cvitek.c	2026-10-18 14:23:04.507139868 -0300
+@@ -8,6 +8,7 @@
+  * it keeps the MAC clocks enabled instead of letting runtime PM gate them.
+  */
+ #include <linux/clk.h>
++#include <linux/etherdevice.h>
+ #include <linux/io.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -96,6 +97,54 @@
+ 	clk_disable_unprepare(data);
+ }
+ 
++/*
++ * The board MAC is burned in the SoC efuse (shadow 0x03050100 + 0x40/0x44,
++ * little endian; OUI 2c:f7:f1 on reCamera).  The vendor U-Boot reads it only
++ * when "cvi_otp" is run; otherwise it makes up a random (locally administered)
++ * MAC and passes that through the DT, so both the vendor kernel and this one
++ * got a new MAC at every boot.  Use the efuse unless a real (globally
++ * administered) MAC came from the DT.  The efuse
++ * clock must be on for the access (reading the shadow with it gated hangs the
++ * bus), the same pattern as the ePHY calibration read in the PHY driver.
++ */
++#define CVITEK_EFUSE_SHADOW_MAC	0x03050140
++
++static void dwmac_cvitek_efuse_mac(struct device *dev, u8 *mac)
++{
++	struct clk *clk;
++	void __iomem *reg;
++	u8 fuse[ETH_ALEN];
++	u32 lo, hi;
++
++	clk = clk_get_sys(NULL, "clk_efuse");
++	if (IS_ERR(clk) || clk_prepare_enable(clk)) {
++		dev_warn(dev, "efuse clock unavailable, no efuse MAC\n");
++		if (!IS_ERR(clk))
++			clk_put(clk);
++		return;
++	}
++
++	reg = ioremap(CVITEK_EFUSE_SHADOW_MAC, 8);
++	if (reg) {
++		lo = readl(reg);
++		hi = readl(reg + 4);
++		iounmap(reg);
++		fuse[0] = lo;
++		fuse[1] = lo >> 8;
++		fuse[2] = lo >> 16;
++		fuse[3] = lo >> 24;
++		fuse[4] = hi;
++		fuse[5] = hi >> 8;
++		if (is_valid_ether_addr(fuse)) {
++			ether_addr_copy(mac, fuse);
++			dev_info(dev, "MAC from efuse %pM\n", mac);
++		}
++	}
++
++	clk_disable_unprepare(clk);
++	clk_put(clk);
++}
++
+ static int dwmac_cvitek_probe(struct platform_device *pdev)
+ {
+ 	struct plat_stmmacenet_data *plat_dat;
+@@ -117,6 +166,14 @@
+ 		return PTR_ERR(plat_dat);
+ 
+ 	/*
++	 * Nothing valid, or a locally administered address: U-Boot without
++	 * ethaddr makes up a random one and passes it on.  Prefer the efuse.
++	 */
++	if (!is_valid_ether_addr(stmmac_res.mac) ||
++	    (stmmac_res.mac[0] & 0x02))
++		dwmac_cvitek_efuse_mac(&pdev->dev, stmmac_res.mac);
++
++	/*
+ 	 * Keep the MAC clock running. The stmmac core calls pm_runtime_put() at
+ 	 * the end of its probe to let runtime PM gate the clocks; holding a
+ 	 * reference here keeps the gate on, which is what the vendor glue does

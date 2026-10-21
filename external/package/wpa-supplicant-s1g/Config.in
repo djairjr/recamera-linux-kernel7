@@ -1,0 +1,8 @@
+config BR2_PACKAGE_WPA_SUPPLICANT_S1G
+	bool "wpa-supplicant-s1g (HaLow)"
+	select BR2_PACKAGE_LIBNL
+	select BR2_PACKAGE_OPENSSL
+	help
+	  Morse Micro's wpa_supplicant for 802.11ah (wpa_supplicant_s1g,
+	  wpa_cli_s1g), upstream release 1.14.1
+	  (github.com/MorseMicro/hostap), the release of the driver.

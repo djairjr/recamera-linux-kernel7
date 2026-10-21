@@ -1,0 +1,215 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Sophgo multimedia blocks of the SG2002 for the reCamera (F7,
+ * docs/multimedia.md): MIPI-CSI receiver, VI + ISP, VPSS, NPU (TPU),
+ * H.264/H.265 and JPEG codecs.
+ *
+ * Mainline has no driver for any of them; these nodes are for the Sophgo osdrv
+ * modules ported to 7.2, so they keep the vendor compatibles and the
+ * clock/reset/reg/interrupt NAMES the drivers request. Taken from the vendor
+ * SDK: build/boards/default/dts/cv181x/cv181x_base.dtsi (reg, clocks, resets)
+ * and build/boards/default/dts/cv181x_riscv/cv181x_base_riscv.dtsi
+ * (interrupts), with:
+ *  - clocks: CV181X_CLK_<X> -> the mainline clk-cv18xx CLK_<X> (same names,
+ *    include/dt-bindings/clock/sophgo,cv1800.h);
+ *  - resets: same bit indices in the same controller (0x3003000), so the
+ *    vendor numbers are valid on the mainline "sophgo,cv1800b-reset"; the
+ *    CSI PHY bits (vendor RST_CSIPHY0/_APB/1/_APB = 70..73) have no name in
+ *    cv18xx-reset.h and are written as numbers;
+ *  - interrupts: vendor raw PLIC numbers N -> SOC_PERIPHERAL_IRQ(N - 16).
+ *
+ * Left out on purpose: vo/mipi_tx/cvifb (no display), dwa, rgn, ive,
+ * fast_image/rtos_cmdqu (FreeRTOS on the C906L), mon.
+ * ION (F7 step 2, package sophgo-ion -> cvi_ion.ko): a carveout heap over the
+ * "ion" reserved-memory region, as the vendor cv181x_default_memmap.dtsi +
+ * cv181x_base.dtsi cvitek-ion node. The region is allocated by size at boot
+ * (no fixed address, no compatible: the vendor "ion-region" early hook cannot
+ * live in a module, which looks the region up instead) and stays in the linear
+ * map, as on the vendor kernel. Size 36 MiB, set by measurement in F7 step
+ * 10 (owner's choice, 19/10/2026): the application load (VI->VPSS online, 4
+ * blocks per VPSS output, YOLO11n on the NPU, H.264 + JPEG at 30 fps) peaks at
+ * 28.4 MB; 36 MiB leaves room for a larger model (YOLO11n segment needs ~3.8
+ * MB more). The vendor's 60 MiB is sized for every use case.
+ */
+
+/ {
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ion_reserved: ion {
+			size = <0x02400000>;		/* 36 MiB */
+			alignment = <0x00100000>;
+		};
+	};
+
+	soc {
+		/* under soc: inherits dma-noncoherent, used by the cache ioctls */
+		cvitek-ion {
+			compatible = "cvitek,cvitek-ion";
+
+			heap-carveout {
+				compatible = "cvitek,carveout";
+				memory-region = <&ion_reserved>;
+			};
+		};
+
+		mipi_rx: cif@a0c2000 {
+			compatible = "cvitek,cif";
+			reg = <0x0a0c2000 0x2000>, <0x0a0d0000 0x1000>,
+			      <0x0a0c4000 0x2000>, <0x0a0c6000 0x2000>,
+			      <0x03001c30 0x30>;
+			reg-names = "csi_mac0", "csi_wrap0", "csi_mac1", "csi_mac2", "pad_ctrl";
+			interrupts = <SOC_PERIPHERAL_IRQ(10) IRQ_TYPE_LEVEL_HIGH>,
+				     <SOC_PERIPHERAL_IRQ(11) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "csi0", "csi1";
+			resets = <&rst 70>, <&rst 72>, <&rst 71>, <&rst 73>;
+			reset-names = "phy0", "phy1", "phy-apb0", "phy-apb1";
+			clocks = <&clk CLK_CAM0>, <&clk CLK_CAM1>, <&clk CLK_SRC_VIP_SYS_2>,
+				 <&clk CLK_MIPIMPLL>, <&clk CLK_DISPPLL>, <&clk CLK_FPLL>;
+			clock-names = "clk_cam0", "clk_cam1", "clk_sys_2",
+				      "clk_mipimpll", "clk_disppll", "clk_fpll";
+			/* the reCamera board DT deletes snsr-reset: no sensor reset GPIO */
+		};
+
+		/* SoC temperature sensor (patch 0021); thermal zone in the board DTS */
+		tempsen: thermal-sensor@30e0000 {
+			compatible = "cvitek,cv181x-thermal";
+			reg = <0x030e0000 0x10000>;
+			clocks = <&clk CLK_TEMPSEN>;
+			clock-names = "clk_tempsen";
+			#thermal-sensor-cells = <1>;
+		};
+
+		sys {
+			compatible = "cvitek,sys";
+		};
+
+		base@a0c8000 {
+			compatible = "cvitek,base";
+			reg = <0x0a0c8000 0x20>;
+			reg-names = "vip_sys";
+			/*
+			 * Not in the vendor node: there the vendor clk driver keeps
+			 * these on (cfg_reg_vip, vip_ip0-3: CLK_IS_CRITICAL;
+			 * axi_vip, src_vip_sys_0-4: CLK_IGNORE_UNUSED), while
+			 * mainline clk-cv18xx turns them off at late init, and a
+			 * vip_sys register access with them off hangs the SoC
+			 * (measured 18/10/2026). base, the root of the VIP
+			 * subsystem, enables them at probe (patch, 7.2 port).
+			 */
+			clocks = <&clk CLK_CFG_REG_VIP>, <&clk CLK_AXI_VIP>,
+				 <&clk CLK_VIP_IP0>, <&clk CLK_VIP_IP1>,
+				 <&clk CLK_VIP_IP2>, <&clk CLK_VIP_IP3>,
+				 <&clk CLK_SRC_VIP_SYS_0>, <&clk CLK_SRC_VIP_SYS_1>,
+				 <&clk CLK_SRC_VIP_SYS_2>, <&clk CLK_SRC_VIP_SYS_3>,
+				 <&clk CLK_SRC_VIP_SYS_4>,
+				 /*
+				  * Also always on in the vendor clk driver, and never
+				  * enabled by the drivers that write their registers
+				  * (cif writes csi_mac/csi_be with no clk call):
+				  * CLK_IS_CRITICAL csi_be, csi0_rx, raw, cam0_vip;
+				  * CLK_IGNORE_UNUSED csi_mac0/1, isp_top, sc_top.
+				  * csi1_rx and csi_mac2 follow their siblings.
+				  */
+				 <&clk CLK_CSI_BE_VIP>, <&clk CLK_CSI0_RX_VIP>,
+				 <&clk CLK_CSI1_RX_VIP>, <&clk CLK_CSI_MAC0_VIP>,
+				 <&clk CLK_CSI_MAC1_VIP>, <&clk CLK_CSI_MAC2_VIP>,
+				 <&clk CLK_RAW_VIP>, <&clk CLK_ISP_TOP_VIP>,
+				 <&clk CLK_CAM0_VIP>, <&clk CLK_SC_TOP_VIP>;
+		};
+
+		vi@a000000 {
+			compatible = "cvitek,vi";
+			reg = <0x0a000000 0x80000>;
+			interrupts = <SOC_PERIPHERAL_IRQ(8) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "isp";
+			clocks = <&clk CLK_SRC_VIP_SYS_0>, <&clk CLK_SRC_VIP_SYS_1>,
+				 <&clk CLK_SRC_VIP_SYS_2>, <&clk CLK_SRC_VIP_SYS_3>,
+				 <&clk CLK_AXI_VIP>, <&clk CLK_CSI_BE_VIP>,
+				 <&clk CLK_RAW_VIP>, <&clk CLK_ISP_TOP_VIP>,
+				 <&clk CLK_CSI_MAC0_VIP>, <&clk CLK_CSI_MAC1_VIP>,
+				 <&clk CLK_CSI_MAC2_VIP>;
+			clock-names = "clk_sys_0", "clk_sys_1", "clk_sys_2", "clk_sys_3",
+				      "clk_axi", "clk_csi_be", "clk_raw", "clk_isp_top",
+				      "clk_csi_mac0", "clk_csi_mac1", "clk_csi_mac2";
+			clock-freq-vip-sys1 = <300000000>;
+		};
+
+		vpss@a080000 {
+			compatible = "cvitek,vpss";
+			reg = <0x0a080000 0x10000>, <0x0a0d1000 0x100>;
+			reg-names = "sc";
+			interrupts = <SOC_PERIPHERAL_IRQ(9) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "sc";
+			clocks = <&clk CLK_SRC_VIP_SYS_0>, <&clk CLK_SRC_VIP_SYS_1>,
+				 <&clk CLK_SRC_VIP_SYS_2>, <&clk CLK_IMG_D_VIP>,
+				 <&clk CLK_IMG_V_VIP>, <&clk CLK_SC_TOP_VIP>,
+				 <&clk CLK_SC_D_VIP>, <&clk CLK_SC_V1_VIP>,
+				 <&clk CLK_SC_V2_VIP>, <&clk CLK_SC_V3_VIP>;
+			clock-names = "clk_sys_0", "clk_sys_1", "clk_sys_2", "clk_img_d",
+				      "clk_img_v", "clk_sc_top", "clk_sc_d", "clk_sc_v1",
+				      "clk_sc_v2", "clk_sc_v3";
+			clock-freq-vip-sys1 = <300000000>;
+		};
+
+		tpu@c100000 {
+			compatible = "cvitek,tpu";
+			reg = <0x0c100000 0x1000>, <0x0c101000 0x1000>;
+			reg-names = "tdma", "tiu";
+			interrupts = <SOC_PERIPHERAL_IRQ(59) IRQ_TYPE_LEVEL_HIGH>,
+				     <SOC_PERIPHERAL_IRQ(60) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "tiu_irq", "tdma_irq";
+			clocks = <&clk CLK_TPU>, <&clk CLK_TPU_FAB>;
+			clock-names = "clk_tpu_axi", "clk_tpu_fab";
+			resets = <&rst RST_TDMA>, <&rst RST_TPU>, <&rst RST_TPUSYS>;
+			reset-names = "res_tdma", "res_tpu", "res_tpusys";
+		};
+
+		vcodec@b020000 {
+			compatible = "cvitek,asic-vcodec";
+			reg = <0x0b020000 0x10000>, <0x0b010000 0x10000>, <0x0b030000 0x100>,
+			      <0x0b058000 0x100>, <0x0b050000 0x400>;
+			reg-names = "h265", "h264", "vc_ctrl", "vc_sbm", "vc_addr_remap";
+			interrupts = <SOC_PERIPHERAL_IRQ(6) IRQ_TYPE_LEVEL_HIGH>,
+				     <SOC_PERIPHERAL_IRQ(5) IRQ_TYPE_LEVEL_HIGH>,
+				     <SOC_PERIPHERAL_IRQ(7) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "h265", "h264", "sbm";
+			clocks = <&clk CLK_AXI_VIDEO_CODEC>,
+				 <&clk CLK_H264C>, <&clk CLK_APB_H264C>,
+				 <&clk CLK_H265C>, <&clk CLK_APB_H265C>,
+				 <&clk CLK_VC_SRC0>, <&clk CLK_VC_SRC1>,
+				 <&clk CLK_VC_SRC2>, <&clk CLK_CFG_REG_VC>;
+			clock-names = "clk_axi_video_codec",
+				      "clk_h264c", "clk_apb_h264c",
+				      "clk_h265c", "clk_apb_h265c",
+				      "clk_vc_src0", "clk_vc_src1",
+				      "clk_vc_src2", "clk_cfg_reg_vc";
+		};
+
+		jpu@b000000 {
+			compatible = "cvitek,asic-jpeg";
+			reg = <0x0b000000 0x300>, <0x0b030000 0x100>, <0x0b058000 0x100>;
+			reg-names = "jpeg", "vc_ctrl", "vc_sbm";
+			interrupts = <SOC_PERIPHERAL_IRQ(4) IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "jpeg";
+			clocks = <&clk CLK_AXI_VIDEO_CODEC>,
+				 <&clk CLK_JPEG>, <&clk CLK_APB_JPEG>,
+				 <&clk CLK_VC_SRC0>, <&clk CLK_VC_SRC1>,
+				 <&clk CLK_VC_SRC2>, <&clk CLK_CFG_REG_VC>;
+			clock-names = "clk_axi_video_codec",
+				      "clk_jpeg", "clk_apb_jpeg",
+				      "clk_vc_src0", "clk_vc_src1",
+				      "clk_vc_src2", "clk_cfg_reg_vc";
+			resets = <&rst RST_JPEG>;
+			reset-names = "jpeg";
+		};
+
+		cvi_vc_drv@b030000 {
+			compatible = "cvitek,cvi_vc_drv";
+			reg = <0x0b030000 0x100>, <0x0b058000 0x100>, <0x0b050000 0x400>;
+			reg-names = "vc_ctrl", "vc_sbm", "vc_addr_remap";
+		};
+	};
+};

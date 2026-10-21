@@ -1,0 +1,31 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] ASoC: sophgo: cv1800b-tdm: accept set_sysclk(0)
+
+simple-audio-card calls set_sysclk with 0 Hz at the end of every stream
+when mclk-fs is set; the driver rejected it with -EINVAL, logging
+"ASoC error (-22) at snd_soc_dai_set_sysclk()" each time. Treat 0 as a
+release: forget the rate, keep the MCLK output (it also clocks the
+internal ADC on SG2002).
+
+diff --color -ruN a/sound/soc/sophgo/cv1800b-tdm.c b/sound/soc/sophgo/cv1800b-tdm.c
+--- a/sound/soc/sophgo/cv1800b-tdm.c	2026-10-18 12:22:50.032805534 -0300
++++ b/sound/soc/sophgo/cv1800b-tdm.c	2026-10-18 12:22:50.058374662 -0300
+@@ -536,6 +536,18 @@
+ 	bool output_enable = (dir == SND_SOC_CLOCK_OUT) ? true : false;
+ 
+ 	dev_dbg(i2s->dev, "%s called with %u\n", __func__, freq);
++
++	/*
++	 * freq == 0 is the machine driver releasing the clock at the end of a
++	 * stream (simple-audio-card does this when mclk-fs is set).  Forget
++	 * the rate but leave the MCLK output as it is: on SG2002 the MCLK of
++	 * I2S3 also clocks the internal ADC, which may be capturing.
++	 */
++	if (!freq) {
++		i2s->mclk_rate = 0;
++		return 0;
++	}
++
+ 	ret = cv1800b_i2s_set_rate_for_mclk(i2s, freq);
+ 	if (ret)
+ 		return ret;

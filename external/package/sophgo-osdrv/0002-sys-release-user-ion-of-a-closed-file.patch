@@ -1,0 +1,238 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] osdrv/sys: reclaim the ION buffers of a killed process
+
+A userspace CVI_SYS_IonAlloc() (VI_DMA_BUF, ISP_SHARED_BUFFER_*) takes a
+dma_buf reference that only SYS_ION_FREE drops. A process killed before its
+teardown (SIGKILL, crash) closes its dma-buf fd but leaves that reference,
+and the buffer stays allocated until a reboot (A2: 3.7 MB per kill).
+
+- Each user allocation records the struct file of /dev/cvi-sys it was made
+  through. When that file is released the buffers become orphans: they
+  cannot be freed there, because a dying process closes /dev/cvi-sys before
+  /dev/cvi-vi and the VI hardware writes into VI_DMA_BUF until the VI
+  release stops it (freeing at release hung the SoC, A2 20/10/2026).
+- SYS_ION_FREE_ORPHANS (new, 'S' 0x20) frees the orphans; recamera-cam's
+  rc_reclaim() calls it once no process holds the MPI devices.
+- The owner is recorded by thread group (fd tables are per process), and
+  SYS_ION_FREE closes the dma-buf fd only in the process that owns it: from
+  another process close_fd() would close an unrelated fd of the caller.
+
+diff -ruN a/sys/common/sys.c b/sys/common/sys.c
+--- a/sys/common/sys.c
++++ b/sys/common/sys.c
+@@ -87,11 +87,12 @@
+ 	}
+ 
+ 	//push into memory manager
++	memset(&mem_info, 0, sizeof(mem_info));	/* reCamera: owner NULL */
+ 	mem_info.dmabuf = NULL;
+ 	mem_info.dmabuf_fd = -1;
+ 	mem_info.vir_addr = vmap_addr;
+ 	mem_info.phy_addr = ionbuf->paddr;
+-	mem_info.fd_pid = current->pid;
++	mem_info.fd_pid = current->tgid;
+ 	mem_info.ionbuf = ionbuf;
+ 	if (sys_ctx_mem_put(&mem_info)) {
+ 		pr_err("allocate mm put failed\n");
+@@ -116,7 +117,7 @@
+ }
+ 
+ static CVI_S32 _sys_ion_alloc(CVI_S32 *p_fd, CVI_U64 *addr_p, void **addr_v, CVI_U32 u32Len,
+-	CVI_U32 is_cached, CVI_U8 *name)
++	CVI_U32 is_cached, CVI_U8 *name, struct file *owner)
+ {
+ 	CVI_S32 dmabuf_fd = 0, ret = 0;
+ 	struct dma_buf *dmabuf;
+@@ -166,11 +167,14 @@
+ 	}
+ 
+ 	//push into memory manager
++	memset(&mem_info, 0, sizeof(mem_info));
+ 	mem_info.dmabuf = (void *)dmabuf;
+ 	mem_info.dmabuf_fd = dmabuf_fd;
+ 	mem_info.vir_addr = vmap_addr;
+ 	mem_info.phy_addr = ionbuf->paddr;
+-	mem_info.fd_pid = current->pid;
++	/* reCamera: fd tables are per process, not per thread */
++	mem_info.fd_pid = current->tgid;
++	mem_info.owner = owner;
+ 	if (sys_ctx_mem_put(&mem_info)) {
+ 		pr_err("allocate mm put failed\n");
+ 		dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
+@@ -231,10 +235,56 @@
+ 	dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
+ 	dma_buf_put(dmabuf);
+ 
+-	cvi_ion_free(mem_info.fd_pid, mem_info.dmabuf_fd);
++	/* reCamera: close_fd() acts on the current process; from another one
++	 * (a channel destroyed by a new process after a crash) it would close
++	 * an unrelated fd of the caller. The owner's fd closes with the owner;
++	 * an exiting owner (a driver release freeing its buffers) has no file
++	 * table any more. */
++	if (mem_info.fd_pid == current->tgid && current->files)
++		cvi_ion_free(mem_info.fd_pid, mem_info.dmabuf_fd);
+ 	return 0;
+ }
+ 
++/*
++ * reCamera: the userspace allocations of a process that exited without
++ * SYS_ION_FREE (killed). They cannot be freed when its /dev/cvi-sys file is
++ * released: the files of a dying process close in fd order, /dev/cvi-sys
++ * before /dev/cvi-vi, and the VI hardware still writes into VI_DMA_BUF
++ * until the VI release stops it (freeing there hung the SoC, A2
++ * 20/10/2026). They become orphans, freed by SYS_ION_FREE_ORPHANS, which
++ * recamera-cam's rc_reclaim() calls once no process holds the MPI devices.
++ */
++#define SYS_ION_ORPHAN ((void *)1)
++/* not in the vendor uapi header; the same number is in recamera-cam.c */
++#define SYS_ION_FREE_ORPHANS _IO(SYS_IOC_MAGIC, 0x20)
++
++static void sys_ion_orphan(struct file *owner)
++{
++	int n = sys_ctx_mem_set_owner(owner, SYS_ION_ORPHAN);
++
++	if (n)
++		pr_info("%d ION buffer(s) of a closed process kept until reclaimed\n", n);
++}
++
++static long sys_ion_free_orphans(void)
++{
++	struct mem_mapping mem_info;
++	struct dma_buf *dmabuf;
++	long n = 0;
++
++	while (!sys_ctx_mem_get_owned(SYS_ION_ORPHAN, &mem_info)) {
++		dmabuf = (struct dma_buf *)mem_info.dmabuf;
++		if (!dmabuf)
++			continue;
++		dma_buf_end_cpu_access(dmabuf, DMA_TO_DEVICE);
++		dma_buf_put(dmabuf);
++		n++;
++	}
++	if (n)
++		pr_info("freed %ld orphan ION buffer(s)\n", n);
++	return n;
++}
++
+ static CVI_S32 _sys_ion_free_nofd(CVI_U64 addr_p)
+ {
+ 	struct mem_mapping mem_info;
+@@ -329,7 +379,7 @@
+ {
+ 	CVI_S32 dma_fd = 0;
+ 
+-	return _sys_ion_alloc(&dma_fd, p_paddr, pp_vaddr, buf_len, is_cached, buf_name);
++	return _sys_ion_alloc(&dma_fd, p_paddr, pp_vaddr, buf_len, is_cached, buf_name, NULL);
+ }
+ EXPORT_SYMBOL_GPL(sys_ion_alloc);
+ 
+@@ -339,7 +389,8 @@
+ }
+ EXPORT_SYMBOL_GPL(sys_ion_alloc_nofd);
+ 
+-static CVI_S32 sys_ion_alloc_user(struct cvi_sys_device *ndev, unsigned long arg)
++static CVI_S32 sys_ion_alloc_user(struct cvi_sys_device *ndev, struct file *filp,
++				  unsigned long arg)
+ {
+ 	CVI_S32 ret = 0, dma_fd = 0;
+ 	CVI_U64 addr_p = 0;
+@@ -355,7 +406,7 @@
+ 	}
+ 
+ 	ret = _sys_ion_alloc(&dma_fd, &addr_p, &addr_v,
+-					ioctl_arg.size, ioctl_arg.cached, ioctl_arg.name);
++					ioctl_arg.size, ioctl_arg.cached, ioctl_arg.name, filp);
+ 	if (ret < 0) {
+ 		pr_err("_sys_ion_alloc failed\n");
+ 		return ret;
+@@ -802,11 +853,14 @@
+ 		break;
+ 
+ 	case SYS_ION_ALLOC:
+-		ret = sys_ion_alloc_user(ndev, arg);
++		ret = sys_ion_alloc_user(ndev, filp, arg);
+ 		break;
+ 	case SYS_ION_FREE:
+ 		ret = sys_ion_free_user(ndev, arg);
+ 		break;
++	case SYS_ION_FREE_ORPHANS:
++		ret = sys_ion_free_orphans();
++		break;
+ 	case SYS_CACHE_INVLD:
+ 		ret = sys_cache_op_userv(arg, enum_cache_op_invalid);
+ 		break;
+@@ -865,6 +919,8 @@
+ 	struct cvi_sys_device *ndev = filp->private_data;
+ 	int cnt = 0;
+ 
++	sys_ion_orphan(filp);
++
+ 	spin_lock(&ndev->close_lock);
+ 	cnt = --ndev->use_count;
+ 	spin_unlock(&ndev->close_lock);
+diff -ruN a/sys/common/sys_context.c b/sys/common/sys_context.c
+--- a/sys/common/sys_context.c
++++ b/sys/common/sys_context.c
+@@ -119,6 +119,40 @@
+ 	return 0;
+ }
+ 
++/* reCamera: take out one allocation of owner (0), or -1 when none is left */
++CVI_S32 sys_ctx_mem_get_owned(void *owner, struct mem_mapping *mem_info)
++{
++	CVI_S32 i, ret = -1;
++
++	spin_lock(&mem_lock);
++	for (i = 0; i < MEM_MAPPING_MAX; i++) {
++		if (ctx_mem_mgr[i].phy_addr && ctx_mem_mgr[i].owner == owner) {
++			memcpy(mem_info, &ctx_mem_mgr[i], sizeof(struct mem_mapping));
++			memset(&ctx_mem_mgr[i], 0, sizeof(struct mem_mapping));
++			ret = 0;
++			break;
++		}
++	}
++	spin_unlock(&mem_lock);
++	return ret;
++}
++
++/* reCamera: give every allocation of owner to new_owner; returns how many */
++CVI_S32 sys_ctx_mem_set_owner(void *owner, void *new_owner)
++{
++	CVI_S32 i, n = 0;
++
++	spin_lock(&mem_lock);
++	for (i = 0; i < MEM_MAPPING_MAX; i++) {
++		if (ctx_mem_mgr[i].phy_addr && ctx_mem_mgr[i].owner == owner) {
++			ctx_mem_mgr[i].owner = new_owner;
++			n++;
++		}
++	}
++	spin_unlock(&mem_lock);
++	return n;
++}
++
+ CVI_S32 sys_ctx_mem_dump(void)
+ {
+ 	CVI_S32 i = 0, cnt = 0;
+diff -ruN a/sys/common/sys_context.h b/sys/common/sys_context.h
+--- a/sys/common/sys_context.h
++++ b/sys/common/sys_context.h
+@@ -28,6 +28,9 @@
+ 	void *dmabuf;
+ 	pid_t fd_pid;
+ 	void *ionbuf;
++	/* reCamera: the /dev/cvi-sys file of a userspace allocation (NULL for
++	 * the kernel's own); SYS_ION_ORPHAN once that file is released */
++	void *owner;
+ };
+ 
+ CVI_S32 sys_ctx_init(void);
+@@ -35,6 +38,8 @@
+ CVI_S32 sys_ctx_mem_put(struct mem_mapping *mem_config);
+ CVI_S32 sys_ctx_mem_get(struct mem_mapping *mem_config);
+ CVI_S32 sys_ctx_mem_dump(void);
++CVI_S32 sys_ctx_mem_get_owned(void *owner, struct mem_mapping *mem_config);
++CVI_S32 sys_ctx_mem_set_owner(void *owner, void *new_owner);
+ 
+ CVI_U32 sys_ctx_get_chipid(void);
+ CVI_U8 *sys_ctx_get_version(void);

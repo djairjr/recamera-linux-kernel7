@@ -1,0 +1,38 @@
+From: Djair Guilherme da Silva Junior <djair.jr@gmail.com>
+Subject: [PATCH 7/7] clk: cv1800: point the ETH0/ETH1 500M dividers at their own registers
+
+The mainline clock table gives clk_eth0_500m and clk_eth1_500m
+REG_DIV_CLK_GPIO_DB (0x094) as their divider register, while the working
+vendor driver uses REG_DIV_CLK_500M_ETH0 (0x08c) and REG_DIV_CLK_500M_ETH1
+(0x090) -- both already defined in clk-cv1800.h and unused. Field layout is
+the same (16, 4, 3). Mirror the vendor so the driver reads and programs the
+divider where the working system does.
+
+--- a/drivers/clk/sophgo/clk-cv1800.c
++++ b/drivers/clk/sophgo/clk-cv1800.c
+@@ -434,9 +434,15 @@
+  * the PTP reference clock only in stmmac_setup_ptp(), after
+  * stmmac_hw_setup() has already reset the DMA engine.
+  */
++/*
++ * The ETH0/ETH1 500M dividers live in their own registers (0x08c and 0x090),
++ * as the vendor clock driver has them; the mainline table points both at the
++ * GPIO debounce divider register (0x094) instead. Same field layout
++ * (16, 4, 3), so only the register changes.
++ */
+ static CV1800_BYPASS_DIV(clk_eth0_500m, clk_bypass_fpll_parents,
+ 			 REG_CLK_EN_0, 25,
+-			 REG_DIV_CLK_GPIO_DB, 16, 4, 3, CV1800_DIV_FLAG,
++			 REG_DIV_CLK_ETH0_500M, 16, 4, 3, CV1800_DIV_FLAG,
+ 			 REG_CLK_BYP_0, 9,
+ 			 CLK_IS_CRITICAL);
+ static CV1800_GATE(clk_axi4_eth0, clk_axi4_bus_parents,
+@@ -444,7 +450,7 @@
+ 		   CLK_IS_CRITICAL);
+ static CV1800_BYPASS_DIV(clk_eth1_500m, clk_bypass_fpll_parents,
+ 			 REG_CLK_EN_0, 27,
+-			 REG_DIV_CLK_GPIO_DB, 16, 4, 3, CV1800_DIV_FLAG,
++			 REG_DIV_CLK_ETH1_500M, 16, 4, 3, CV1800_DIV_FLAG,
+ 			 REG_CLK_BYP_0, 10,
+ 			 0);
+ static CV1800_GATE(clk_axi4_eth1, clk_axi4_bus_parents,

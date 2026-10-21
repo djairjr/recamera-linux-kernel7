@@ -1,0 +1,136 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] ASoC: sophgo: cv1800b-adc: start the MCLK of the source I2S
+
+The internal ADC is clocked by the MCLK output of another I2S block (I2S3
+on SG2002). The vendor driver (cv181xadc.c, "clk_source") turns that MCLK
+output on and sets its divider before capturing. Without it, capture
+returns random data unless a playback stream is running on I2S3.
+
+Add the optional "sophgo,mclk-source" phandle and "mclk" clock: on
+hw_params, enable the clock, program MCLK = 256 fs and switch the MCLK
+output on, leaving it on as the vendor does.
+
+diff --color -ruN a/sound/soc/sophgo/cv1800b-sound-adc.c b/sound/soc/sophgo/cv1800b-sound-adc.c
+--- a/sound/soc/sophgo/cv1800b-sound-adc.c	2026-10-18 12:11:15.545044967 -0300
++++ b/sound/soc/sophgo/cv1800b-sound-adc.c	2026-10-18 12:11:50.874809610 -0300
+@@ -14,6 +14,9 @@
+ #include <linux/io.h>
+ #include <linux/kernel.h>
+ #include <linux/bitops.h>
++#include <linux/clk.h>
++#include <linux/of.h>
++#include <linux/of_address.h>
+ 
+ #define CV1800B_RXADC_WORD_LEN 16
+ #define CV1800B_RXADC_CHANNELS 2
+@@ -94,8 +97,62 @@
+ 	void __iomem *regs;
+ 	struct device *dev;
+ 	unsigned int mclk_rate;
++	void __iomem *mclk_src;		/* I2S block that feeds MCLK to the codec */
++	struct clk *mclk_src_clk;	/* its CCF clock (CLK_SDMA_AUDx) */
++	bool mclk_src_on;
+ };
+ 
++/* Registers of the I2S block named by "sophgo,mclk-source" (cv1800b-tdm). */
++#define CV1800B_I2S_CLK_CTRL0		0x060
++#define CV1800B_I2S_CLK_CTRL1		0x064
++#define CV1800B_I2S_MCLK_OUT_EN		BIT(7)
++#define CV1800B_I2S_AUD_EN		BIT(8)
++#define CV1800B_I2S_MCLK_DIV		GENMASK(15, 0)
++
++/*
++ * The internal ADC has no clock of its own: it runs from the MCLK output of
++ * another I2S block (I2S3 on SG2002, the one wired to the internal DAC).  The
++ * vendor driver (cv181xadc.c, "clk_source") switches that MCLK output on
++ * before capturing and sets its divider; without it the ADC produces random
++ * data unless a playback stream happens to be running on that I2S.
++ * Here: enable the source clock, program MCLK = target, turn the MCLK output
++ * on, and leave it on (as the vendor does).
++ */
++static int cv1800b_adc_mclk_source_on(struct cv1800b_priv *priv,
++				      unsigned int target)
++{
++	unsigned long parent;
++	u32 div, val;
++	int ret;
++
++	if (!priv->mclk_src || !target)
++		return 0;
++
++	if (!priv->mclk_src_on) {
++		ret = clk_prepare_enable(priv->mclk_src_clk);
++		if (ret)
++			return ret;
++		priv->mclk_src_on = true;
++	}
++
++	parent = clk_get_rate(priv->mclk_src_clk);
++	div = DIV_ROUND_CLOSEST(parent, target);
++	if (!div || div > 0xffff)
++		return -EINVAL;
++
++	val = readl(priv->mclk_src + CV1800B_I2S_CLK_CTRL1);
++	val = u32_replace_bits(val, div, CV1800B_I2S_MCLK_DIV);
++	writel(val, priv->mclk_src + CV1800B_I2S_CLK_CTRL1);
++
++	val = readl(priv->mclk_src + CV1800B_I2S_CLK_CTRL0);
++	val |= CV1800B_I2S_AUD_EN | CV1800B_I2S_MCLK_OUT_EN;
++	writel(val, priv->mclk_src + CV1800B_I2S_CLK_CTRL0);
++
++	dev_dbg(priv->dev, "mclk source: parent %lu Hz / %u = %lu Hz\n",
++		parent, div, parent / div);
++	return 0;
++}
++
+ static int cv1800b_adc_setbclk_div(struct cv1800b_priv *priv, unsigned int rate)
+ {
+ 	u32 val;
+@@ -164,6 +221,14 @@
+ 	u32 val;
+ 	int ret;
+ 
++	if (!priv->mclk_rate)
++		priv->mclk_rate = 256 * rate;
++	ret = cv1800b_adc_mclk_source_on(priv, priv->mclk_rate);
++	if (ret) {
++		dev_err(priv->dev, "could not start the MCLK source: %d\n", ret);
++		return ret;
++	}
++
+ 	ret = cv1800b_adc_setbclk_div(priv, rate);
+ 	if (ret) {
+ 		dev_err(priv->dev,
+@@ -326,6 +391,7 @@
+ {
+ 	struct device *dev = &pdev->dev;
+ 	struct cv1800b_priv *priv;
++	struct device_node *np;
+ 
+ 	priv = devm_kzalloc(dev, sizeof(*priv), GFP_KERNEL);
+ 	if (!priv)
+@@ -336,6 +402,24 @@
+ 	if (IS_ERR(priv->regs))
+ 		return PTR_ERR(priv->regs);
+ 
++	np = of_parse_phandle(dev->of_node, "sophgo,mclk-source", 0);
++	if (np) {
++		struct resource res;
++		int err = of_address_to_resource(np, 0, &res);
++
++		of_node_put(np);
++		if (err)
++			return dev_err_probe(dev, err, "bad MCLK source reg\n");
++		/* No request: the I2S driver owns this region. */
++		priv->mclk_src = devm_ioremap(dev, res.start, resource_size(&res));
++		if (!priv->mclk_src)
++			return -ENOMEM;
++		priv->mclk_src_clk = devm_clk_get(dev, "mclk");
++		if (IS_ERR(priv->mclk_src_clk))
++			return dev_err_probe(dev, PTR_ERR(priv->mclk_src_clk),
++					     "MCLK source needs clock \"mclk\"\n");
++	}
++
+ 	/* The microphone starts muted; userspace switches it on when needed. */
+ 	writel(readl(priv->regs + CV1800B_RXADC_ANA2) |
+ 	       REG_MUTEL_RXPGA | REG_MUTER_RXPGA,

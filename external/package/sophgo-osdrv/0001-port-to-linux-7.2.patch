@@ -1,0 +1,2343 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] osdrv: port the Sophgo multimedia modules to Linux 7.2
+
+Vendor osdrv/interdrv (cv181x) built out of tree for 7.2. Grows step by
+step with the modules of F7 (docs/multimedia.md); every change is
+marked with a "7.2 port" comment. Modules: sys, base, snsr_i2c, cif
+(cvi_mipi_rx), vi, vpss, vcodec, jpeg, cvi_vc_drv (cvi_vc_driver), tpu.
+
+diff -ruN a/base/base.c b/base/base.c
+--- a/base/base.c
++++ b/base/base.c
+@@ -21,7 +21,7 @@
+ #endif
+ #include <linux/security.h>
+ #include <linux/cred.h>
+-#include "tee_cv_private.h"
++/* 7.2 port: tee_cv_private.h (vendor drivers/tee) is unused here */
+ #include "base.h"
+ #include "vb.h"
+ #include "cvi_vb_proc.h"
+@@ -33,7 +33,16 @@
+ #include <sys_k.h>
+ #include <vip_common.h>
+ 
++/*
++ * 7.2 port: the eFuse sysfs files of the vendor (efuse_shadow read,
++ * efuse_prog WRITE, uid) need the vendor cvi_efuse driver, which 7.2 does
++ * not have, and programming eFuse from sysfs is irreversible: left out on
++ * purpose (BASE_EFUSE_SYSFS is never defined). The MPI reads the chip id
++ * through the base ioctl, not through these files.
++ */
++#ifdef BASE_EFUSE_SYSFS
+ #include "linux/cv180x_efuse.h"
++#endif
+ 
+ #ifndef UNUSED
+ #define UNUSED(x) ((void)(x))
+@@ -96,6 +105,7 @@
+ module_param(base_log_lv, int, 0644);
+ 
+ 
++#ifdef BASE_EFUSE_SYSFS
+ static ssize_t base_efuse_shadow_show(struct class *class,
+ 				      struct class_attribute *attr, char *buf)
+ {
+@@ -173,8 +183,10 @@
+ 	return scnprintf(buf, PAGE_SIZE, "UID: %08x_%08x\n", uid_3, uid_4);
+ }
+ 
+-static ssize_t base_rosc_show(struct class *class,
+-			      struct class_attribute *attr, char *buf)
++#endif /* BASE_EFUSE_SYSFS */
++
++static ssize_t base_rosc_show(const struct class *class,	/* 7.2: const */
++			      const struct class_attribute *attr, char *buf)
+ {
+ 	int count = 0;
+ 	void __iomem *rosc_base;
+@@ -201,8 +213,8 @@
+ 	return count;
+ }
+ 
+-static ssize_t base_rosc_store(struct class *class,
+-			       struct class_attribute *attr,
++static ssize_t base_rosc_store(const struct class *class,	/* 7.2: const */
++			       const struct class_attribute *attr,
+ 			       const char *buf, size_t count)
+ {
+ 	CVI_U32 chip_id;
+@@ -242,9 +254,11 @@
+ 	return count;
+ }
+ 
++#ifdef BASE_EFUSE_SYSFS
+ CLASS_ATTR_RW(base_efuse_shadow);
+ CLASS_ATTR_RW(base_efuse_prog);
+ CLASS_ATTR_RO(base_uid);
++#endif
+ CLASS_ATTR_RW(base_rosc);
+ 
+ #ifndef FPGA_EARLY_PORTING_CHIP_ID
+@@ -418,7 +432,8 @@
+ 	INIT_LIST_HEAD(&ps->list);
+ 	ps->state_pid = get_pid(task_pid(current));
+ 	ps->cred = get_current_cred();
+-	security_task_getsecid(current, &ps->secid);
++	/* 7.2 port: security_task_getsecid() is gone; secid only fed the
++	 * pre-4.10 kill_pid_info_as_cred() branch */
+ 	/* memory barrier in smp case. */
+ 	smp_wmb();
+ 	/* replace the private data with base state */
+@@ -691,7 +706,7 @@
+ 
+ static ssize_t power_proc_write(struct file *file, const char __user *user_buf, size_t count, loff_t *ppos)
+ {
+-	struct base_device *ndev = PDE_DATA(file_inode(file));
++	struct base_device *ndev = pde_data(file_inode(file));
+ 	UNUSED(ppos);
+ 
+ 	set_power_hdler(ndev, user_buf);
+@@ -701,7 +716,7 @@
+ 
+ static int proc_power_open(struct inode *inode, struct file *file)
+ {
+-	struct base_device *ndev = PDE_DATA(inode);
++	struct base_device *ndev = pde_data(inode);
+ 
+ 	return single_open(file, proc_power_show, ndev);
+ }
+@@ -823,6 +838,22 @@
+ 	if (!ndev)
+ 		return -ENOMEM;
+ 
++	/*
++	 * 7.2 port: enable the VIP clocks before any vip_sys access. The vendor
++	 * clk driver never turned them off (CLK_IS_CRITICAL/IGNORE_UNUSED);
++	 * mainline does at late init, and touching vip_sys then hangs the SoC.
++	 * The clocks are listed in the base DT node.
++	 */
++	{
++		struct clk_bulk_data *clks;
++
++		ret = devm_clk_bulk_get_all_enabled(dev, &clks);
++		if (ret < 0)
++			return dev_err_probe(dev, ret, "VIP clocks\n");
++		if (ret == 0)
++			dev_warn(dev, "no VIP clocks in DT: vip_sys access may hang\n");
++	}
++
+ 	ndev->shared_mem = kzalloc(BASE_SHARE_MEM_SIZE, GFP_KERNEL);
+ 	if (!ndev->shared_mem)
+ 		return -ENOMEM;
+@@ -882,7 +913,7 @@
+ 	return 0;
+ }
+ 
+-static int base_remove(struct platform_device *pdev)
++static void base_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	struct base_device *ndev = platform_get_drvdata(pdev);
+ 
+@@ -899,8 +930,6 @@
+ 	misc_deregister(&ndev->miscdev);
+ 	platform_set_drvdata(pdev, NULL);
+ 	CVI_TRACE_BASE(CVI_BASE_DBG_DEBUG, "%s DONE\n", __func__);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id cvi_base_dt_match[] = { { .compatible = "cvitek,base" }, {} };
+@@ -917,9 +946,11 @@
+ 
+ static void base_cleanup(void)
+ {
++#ifdef BASE_EFUSE_SYSFS
+ 	class_remove_file(pbase_class, &class_attr_base_efuse_shadow);
+ 	class_remove_file(pbase_class, &class_attr_base_efuse_prog);
+ 	class_remove_file(pbase_class, &class_attr_base_uid);
++#endif
+ 	class_remove_file(pbase_class, &class_attr_base_rosc);
+ 	class_destroy(pbase_class);
+ }
+@@ -931,13 +962,14 @@
+ 
+ 	top_base = ioremap(TOP_BASE, TOP_REG_BANK_SIZE);
+ 
+-	pbase_class = class_create(THIS_MODULE, BASE_CLASS_NAME);
++	pbase_class = class_create(BASE_CLASS_NAME)	/* 7.2: no owner */;
+ 	if (IS_ERR(pbase_class)) {
+ 		CVI_TRACE_BASE(CVI_BASE_DBG_ERR, "create class failed\n");
+ 		rc = PTR_ERR(pbase_class);
+ 		goto cleanup;
+ 	}
+ 
++#ifdef BASE_EFUSE_SYSFS
+ 	rc = class_create_file(pbase_class, &class_attr_base_efuse_shadow);
+ 	if (rc) {
+ 		CVI_TRACE_BASE(CVI_BASE_DBG_ERR, "base: can't create sysfs base_efuse_shadow file\n");
+@@ -956,6 +988,7 @@
+ 		goto cleanup;
+ 	}
+ 
++#endif
+ 	rc = class_create_file(pbase_class, &class_attr_base_rosc);
+ 	if (rc) {
+ 		CVI_TRACE_BASE(CVI_BASE_DBG_ERR, "base: can't create sysfs base_rosc file\n");
+diff -ruN a/base/base.h b/base/base.h
+--- a/base/base.h
++++ b/base/base.h
+@@ -5,6 +5,8 @@
+ #include "base_debug.h"
+ 
+ unsigned int cvi_base_read_chip_id(void);
++unsigned int cvi_base_read_chip_version(void);	/* 7.2 port: prototypes */
++unsigned int cvi_base_read_chip_pwr_on_reason(void);
+ void vip_set_base_addr(void *base);
+ 
+ #endif
+diff -ruN a/base/chip/cv181x/vip_common.h b/base/chip/cv181x/vip_common.h
+--- a/base/chip/cv181x/vip_common.h
++++ b/base/chip/cv181x/vip_common.h
+@@ -148,6 +148,8 @@
+ void vip_set_base_addr(void *base);
+ union vip_sys_clk vip_get_clk_lp(void);
+ void vip_set_clk_lp(union vip_sys_clk clk);
++union vip_sys_clk_ctrl0 vip_get_clk_ctrl0(void);	/* 7.2 port: prototypes */
++void vip_set_clk_ctrl0(union vip_sys_clk_ctrl0 cfg);
+ union vip_sys_reset vip_get_reset(void);
+ void vip_set_reset(union vip_sys_reset reset);
+ void vip_toggle_reset(union vip_sys_reset mask);
+diff -ruN a/base/cvi_sys_proc.c b/base/cvi_sys_proc.c
+--- a/base/cvi_sys_proc.c
++++ b/base/cvi_sys_proc.c
+@@ -1,3 +1,4 @@
++#include <generated/utsversion.h>	/* 7.2: UTS_VERSION lives here */
+ #include "cvi_sys_proc.h"
+ 
+ #define SYS_PROC_NAME			"sys"
+diff -ruN a/base/cvi_vb_proc.c b/base/cvi_vb_proc.c
+--- a/base/cvi_vb_proc.c
++++ b/base/cvi_vb_proc.c
+@@ -1,3 +1,4 @@
++#include <generated/utsversion.h>	/* 7.2: UTS_VERSION lives here */
+ #include "cvi_vb_proc.h"
+ #include "sys.h"
+ 
+diff -ruN a/base/vb.c b/base/vb.c
+--- a/base/vb.c
++++ b/base/vb.c
+@@ -239,10 +239,10 @@
+ 	vbPool[poolId].u32FreeBlkCnt = config->blk_cnt;
+ 	vbPool[poolId].u32MinFreeBlkCnt = vbPool[poolId].u32FreeBlkCnt;
+ 	if (strlen(config->pool_name) != 0)
+-		strncpy(vbPool[poolId].acPoolName, config->pool_name,
++		strscpy(vbPool[poolId].acPoolName, config->pool_name,
+ 			sizeof(vbPool[poolId].acPoolName));
+ 	else
+-		strncpy(vbPool[poolId].acPoolName, "vbpool", sizeof(vbPool[poolId].acPoolName));
++		strscpy(vbPool[poolId].acPoolName, "vbpool", sizeof(vbPool[poolId].acPoolName));
+ 	vbPool[poolId].acPoolName[VB_POOL_NAME_LEN - 1] = '\0';
+ 
+ 	FIFO_INIT(&vbPool[poolId].freeList, vbPool[poolId].blk_cnt);
+@@ -284,7 +284,7 @@
+ 	vbPool[poolId].bIsExternal = CVI_TRUE;
+ 	vbPool[poolId].u32FreeBlkCnt = config->blk_cnt;
+ 	vbPool[poolId].u32MinFreeBlkCnt = vbPool[poolId].u32FreeBlkCnt;
+-	strncpy(vbPool[poolId].acPoolName, "vbpoolex", sizeof(vbPool[poolId].acPoolName));
++	strscpy(vbPool[poolId].acPoolName, "vbpoolex", sizeof(vbPool[poolId].acPoolName));
+ 	vbPool[poolId].acPoolName[VB_POOL_NAME_LEN - 1] = '\0';
+ 
+ 	FIFO_INIT(&vbPool[poolId].freeList, vbPool[poolId].blk_cnt);
+diff -ruN a/cif/chip/cv181x/cif.c b/cif/chip/cv181x/cif.c
+--- a/cif/chip/cv181x/cif.c
++++ b/cif/chip/cv181x/cif.c
+@@ -3,13 +3,16 @@
+ #include <linux/interrupt.h>
+ #include <linux/of_platform.h>
+ #include <linux/of_reserved_mem.h>
+-#include <linux/of_gpio.h>
++#include <linux/gpio.h>			/* 7.2 port: legacy numeric API */
++#include <linux/gpio/consumer.h>	/* 7.2 port: of_gpio.h is gone */
++#define OF_GPIO_ACTIVE_LOW 0x1		/* 7.2 port: from the removed of_gpio.h */
+ #include <linux/platform_device.h>
+ #include <linux/delay.h>
+ #include <linux/iommu.h>
+ #include <linux/irq.h>
+ #include <linux/reset.h>
+ #include <generated/compile.h>
++#include <generated/utsversion.h>	/* 7.2: UTS_VERSION */
+ #include <linux/io.h>
+ #include <linux/clk.h>
+ #include <linux/cvi_defines.h>
+@@ -113,7 +116,7 @@
+ 	return container_of(file->private_data, struct cvi_cif_dev, miscdev);
+ }
+ 
+-const char *_to_string_input_mode(enum input_mode_e input_mode)
++static const char *_to_string_input_mode(enum input_mode_e input_mode)
+ {
+ 	switch (input_mode) {
+ 	case INPUT_MODE_MIPI:
+@@ -139,7 +142,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_mac_clk(enum rx_mac_clk_e mac_clk)
++static const char *_to_string_mac_clk(enum rx_mac_clk_e mac_clk)
+ {
+ 	switch (mac_clk) {
+ 	case RX_MAC_CLK_200M:
+@@ -157,7 +160,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_cmd(unsigned int cmd)
++static const char *_to_string_cmd(unsigned int cmd)
+ {
+ 	switch (cmd) {
+ 	case CVI_MIPI_SET_DEV_ATTR:
+@@ -196,7 +199,7 @@
+ 	return "unknown";
+ }
+ 
+-const char *_to_string_raw_data_type(enum raw_data_type_e raw_data_type)
++static const char *_to_string_raw_data_type(enum raw_data_type_e raw_data_type)
+ {
+ 	switch (raw_data_type) {
+ 	case RAW_DATA_8BIT:
+@@ -214,7 +217,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_mipi_wdr_mode(enum mipi_wdr_mode_e wdr)
++static const char *_to_string_mipi_wdr_mode(enum mipi_wdr_mode_e wdr)
+ {
+ 	switch (wdr) {
+ 	case CVI_MIPI_WDR_MODE_NONE:
+@@ -232,7 +235,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_wdr_mode(enum wdr_mode_e wdr)
++static const char *_to_string_wdr_mode(enum wdr_mode_e wdr)
+ {
+ 	switch (wdr) {
+ 	case CVI_WDR_MODE_NONE:
+@@ -250,7 +253,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_lvds_sync_mode(enum lvds_sync_mode_e mode)
++static const char *_to_string_lvds_sync_mode(enum lvds_sync_mode_e mode)
+ {
+ 	switch (mode) {
+ 	case LVDS_SYNC_MODE_SOF:
+@@ -262,7 +265,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_bit_endian(enum lvds_bit_endian endian)
++static const char *_to_string_bit_endian(enum lvds_bit_endian endian)
+ {
+ 	switch (endian) {
+ 	case LVDS_ENDIAN_LITTLE:
+@@ -274,7 +277,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_lvds_vsync_type(enum lvds_vsync_type_e type)
++static const char *_to_string_lvds_vsync_type(enum lvds_vsync_type_e type)
+ {
+ 	switch (type) {
+ 	case LVDS_VSYNC_NORMAL:
+@@ -288,7 +291,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_lvds_fid_type(enum lvds_fid_type_e type)
++static const char *_to_string_lvds_fid_type(enum lvds_fid_type_e type)
+ {
+ 	switch (type) {
+ 	case LVDS_FID_NONE:
+@@ -300,7 +303,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_mclk(enum cam_pll_freq_e freq)
++static const char *_to_string_mclk(enum cam_pll_freq_e freq)
+ {
+ 	switch (freq) {
+ 	case CAMPLL_FREQ_NONE:
+@@ -320,7 +323,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_csi_decode(enum csi_decode_fmt_e fmt)
++static const char *_to_string_csi_decode(enum csi_decode_fmt_e fmt)
+ {
+ 	switch (fmt) {
+ 	case DEC_FMT_YUV422_8:
+@@ -338,7 +341,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_dlane_state(enum mipi_dlane_state_e state)
++static const char *_to_string_dlane_state(enum mipi_dlane_state_e state)
+ {
+ 	switch (state) {
+ 	case HS_IDLE:
+@@ -360,7 +363,7 @@
+ 	}
+ }
+ 
+-const char *_to_string_deskew_state(enum mipi_deskew_state_e state)
++static const char *_to_string_deskew_state(enum mipi_deskew_state_e state)
+ {
+ 	switch (state) {
+ 	case DESKEW_IDLE:
+@@ -2230,9 +2233,17 @@
+ 		}
+ 	#else
+ 		/* [TODO] a hack for the CAM0PLL/CAM1PLL pll */
+-
++		/*
++		 * 7.2 port: this is the path the vendor reCamera kernel uses (it has
++		 * no CONFIG_COMMON_CLK_CVITEK): cam0pll is reprogrammed so that
++		 * clk_cam0 gives an exact MCLK (24 MHz for the OV5647), which the
++		 * mainline clk-cv18xx cannot produce from the fixed 1188 MHz PLL.
++		 * On 7.2 cam0pll only feeds clk_cam0/clk_cam1 and its unused
++		 * d2/d3 dividers (VIP runs on mipimpll/disppll, measured), so
++		 * nothing else is affected. The output gate is driven through the
++		 * clk API below instead of relying on its boot state.
++		 */
+ 		(void)dev;
+-		(void)link;
+ 		/* set pwd */
+ 		value = ioread32(ioremap(0x03002800, 0x4));
+ 		value |= (1<<12);
+@@ -2270,6 +2281,14 @@
+ 			iowrite32(value, ioremap(0x03002800, 0x4));
+ 			udelay(100);
+ 		}
++		/* 7.2 port: MCLK0 output gate (REG_CLK_EN_2 bit 16) via the clk API */
++		if (on && !cdev->clk_cam0.is_on && !IS_ERR_OR_NULL(cdev->clk_cam0.clk_o)) {
++			if (!clk_prepare_enable(cdev->clk_cam0.clk_o))
++				cdev->clk_cam0.is_on = 1;
++		} else if (!on && cdev->clk_cam0.is_on) {
++			clk_disable_unprepare(cdev->clk_cam0.clk_o);
++			cdev->clk_cam0.is_on = 0;
++		}
+ 	#endif
+ 	}
+ 
+@@ -2296,6 +2315,14 @@
+ 			cdev->clk_cam1.is_on = 0;
+ 		}
+ 	#else
++		/*
++		 * 7.2 port: refused. This vendor hack reprograms CAM1PLL, which on
++		 * 7.2 is in use by other clocks (measured: enabled, 1080 MHz), so
++		 * it would change their rate behind the clk framework. The reCamera
++		 * sensor uses MCLK0 only (ov5647 .mclk.cam = 0).
++		 */
++		dev_err(dev, "mclk1 needs CAM1PLL reprogramming, not supported on this kernel\n");
++		return -EOPNOTSUPP;
+ 		/* set pwd */
+ 		value = ioread32(ioremap(0x03002800, 0x4));
+ 		value |= (1<<16);
+@@ -2939,13 +2966,23 @@
+ 		link = &dev->link[i];
+ 		link->dev = &pdev->dev;
+ 		link->mac_clk = RX_MAC_CLK_400M;
+-		link->snsr_rst_pin = of_get_named_gpio_flags(pdev->dev.of_node,
+-				"snsr-reset", i, &link->snsr_rst_pol);
+-		if (link->snsr_rst_pin < 0)
+-			break;
+-
+-		if (gpio_request(link->snsr_rst_pin, "snsr-rst-gpio"))
+-			return 0;
++		/*
++		 * 7.2 port: of_get_named_gpio_flags() is gone. The descriptor API
++		 * needs the "-gpios" suffix: DT property "snsr-reset-gpios"
++		 * (vendor: "snsr-reset"; the reCamera has none). The rest of the
++		 * driver keeps the vendor numeric GPIO + polarity, so convert;
++		 * the line is already requested (devm) here.
++		 */
++		{
++			struct gpio_desc *desc;
++
++			desc = devm_gpiod_get_index_optional(&pdev->dev, "snsr-reset", i,
++							     GPIOD_ASIS);
++			if (IS_ERR_OR_NULL(desc))
++				break;
++			link->snsr_rst_pin = desc_to_gpio(desc);
++			link->snsr_rst_pol = gpiod_is_active_low(desc) ? 1 : 0;	/* OF_GPIO_ACTIVE_LOW */
++		}
+ 
+ 		dev_info(&pdev->dev, "rst_pin = %d, pol = %d\n",
+ 			link->snsr_rst_pin, link->snsr_rst_pol);
+@@ -3268,7 +3305,7 @@
+ 
+ static ssize_t cif_proc_write(struct file *file, const char __user *user_buf, size_t count, loff_t *ppos)
+ {
+-	struct cvi_cif_dev *dev = PDE_DATA(file_inode(file));
++	struct cvi_cif_dev *dev = pde_data(file_inode(file));
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+ 	char txt_buff[MAX_CIF_PROC_BUF];
+ 
+@@ -3286,7 +3323,7 @@
+ 
+ static int proc_cif_open(struct inode *inode, struct file *file)
+ {
+-	struct cvi_cif_dev *dev = PDE_DATA(inode);
++	struct cvi_cif_dev *dev = pde_data(inode);
+ 
+ 	return single_open(file, proc_cif_show, dev);
+ }
+@@ -3350,15 +3387,10 @@
+ 	return 0;
+ }
+ 
+-static int cvi_cif_remove(struct platform_device *pdev)
++static void cvi_cif_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	struct cvi_cif_dev *dev;
+ 
+-	if (!pdev) {
+-		dev_err(&pdev->dev, "invalid param");
+-		return -EINVAL;
+-	}
+-
+ 	/* rm cif_cb */
+ 	if (cif_rm_cb())
+ 		dev_err(&pdev->dev, "cif: failed to rm cb.\n");
+@@ -3366,7 +3398,7 @@
+ 	dev = dev_get_drvdata(&pdev->dev);
+ 	if (!dev) {
+ 		dev_err(&pdev->dev, "Can not get cvi_cif drvdata");
+-		return 0;
++		return;
+ 	}
+ 
+ 	misc_deregister(&dev->miscdev);
+@@ -3375,18 +3407,17 @@
+ #ifdef CONFIG_PROC_FS
+ 	proc_remove(cif_proc_entry);
+ #endif
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+-void sensor_i2c_write(struct isp_i2c_data *i2c_data, unsigned short reg_addr, unsigned short data)
++static void sensor_i2c_write(struct isp_i2c_data *i2c_data, unsigned short reg_addr, unsigned short data)
+ {
+ 	i2c_data->reg_addr = reg_addr;
+ 	i2c_data->data = data;
+ 	vip_sys_cmm_cb_i2c(CVI_SNS_I2C_WRITE, (void *)i2c_data);
+ }
+ 
+-void sensor_standby_restart(struct cvi_cif_dev *dev, bool enable)
++static void sensor_standby_restart(struct cvi_cif_dev *dev, bool enable)
+ {
+ 	int i;
+ 	struct isp_i2c_data *i2c_data;
+diff -ruN a/cif/chip/cv181x/cif.h b/cif/chip/cv181x/cif.h
+--- a/cif/chip/cv181x/cif.h
++++ b/cif/chip/cv181x/cif.h
+@@ -32,7 +32,7 @@
+ 	unsigned int			crop_top;
+ 	unsigned int			distance_fp;
+ 	int				snsr_rst_pin;
+-	enum of_gpio_flags		snsr_rst_pol;
++	int				snsr_rst_pol;	/* 7.2 port: was enum of_gpio_flags */
+ 	union {
+ 		struct cvi_csi_status	sts_csi;
+ 		struct cvi_lvds_status	sts_lvds;
+diff -ruN a/cvi_vc_drv/cvi_vc_drv.c b/cvi_vc_drv/cvi_vc_drv.c
+--- a/cvi_vc_drv/cvi_vc_drv.c
++++ b/cvi_vc_drv/cvi_vc_drv.c
+@@ -1,5 +1,6 @@
+ #include <linux/cvi_base_ctx.h>
+ #include <linux/slab.h>
++#include <linux/platform_device.h> /* 7.2 port: no longer pulled in indirectly */
+ #include <base_cb.h>
+ #include <base_ctx.h>
+ 
+@@ -1360,7 +1361,7 @@
+ 	int err = 0;
+ 	int i = 0;
+ 
+-	vdev->cvi_vc_class = class_create(THIS_MODULE, CVI_VC_DRV_CLASS_NAME);
++	vdev->cvi_vc_class = class_create(CVI_VC_DRV_CLASS_NAME);
+ 	if (IS_ERR(vdev->cvi_vc_class)) {
+ 		pr_err("create class failed\n");
+ 		return PTR_ERR(vdev->cvi_vc_class);
+@@ -1665,7 +1666,8 @@
+ 	return err;
+ }
+ 
+-static int cvi_vc_drv_remove(struct platform_device *pdev)
++/* 7.2 port: platform_driver.remove returns void */
++static void cvi_vc_drv_remove(struct platform_device *pdev)
+ {
+ 	struct cvi_vc_drv_device *vdev = platform_get_drvdata(pdev);
+ 
+@@ -1700,7 +1702,6 @@
+ 	}
+ #endif
+ 	class_destroy(vdev->cvi_vc_class);
+-	return 0;
+ }
+ 
+ unsigned int cvi_vc_drv_read_vc_reg(REG_TYPE eRegType, unsigned long addr)
+diff -ruN a/cvi_vc_drv/cvi_vc_drv_proc.c b/cvi_vc_drv/cvi_vc_drv_proc.c
+--- a/cvi_vc_drv/cvi_vc_drv_proc.c
++++ b/cvi_vc_drv/cvi_vc_drv_proc.c
+@@ -5,6 +5,7 @@
+ #include <linux/platform_device.h>
+ #include <linux/version.h>
+ #include <generated/compile.h>
++#include <generated/utsversion.h> /* 7.2 port: UTS_VERSION moved here */
+ 
+ #include <base_ctx.h>
+ #include <linux/cvi_comm_venc.h>
+@@ -537,7 +538,7 @@
+ 
+ static int venc_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, venc_proc_show, PDE_DATA(inode));
++	return single_open(file, venc_proc_show, pde_data(inode));
+ }
+ 
+ static ssize_t
+@@ -779,7 +780,7 @@
+ 
+ static int h265e_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, h265e_proc_show, PDE_DATA(inode));
++	return single_open(file, h265e_proc_show, pde_data(inode));
+ }
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+@@ -831,7 +832,7 @@
+ 
+ static int codecinst_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, codecinst_proc_show, PDE_DATA(inode));
++	return single_open(file, codecinst_proc_show, pde_data(inode));
+ }
+ 
+ 
+@@ -984,7 +985,7 @@
+ 
+ static int h264e_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, h264e_proc_show, PDE_DATA(inode));
++	return single_open(file, h264e_proc_show, pde_data(inode));
+ }
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+@@ -1129,7 +1130,7 @@
+ 
+ static int jpege_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, jpege_proc_show, PDE_DATA(inode));
++	return single_open(file, jpege_proc_show, pde_data(inode));
+ }
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+@@ -1759,7 +1760,7 @@
+ 
+ static int rc_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, rc_proc_show, PDE_DATA(inode));
++	return single_open(file, rc_proc_show, pde_data(inode));
+ }
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+@@ -2046,7 +2047,7 @@
+ 
+ static int vdec_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, vdec_proc_show, PDE_DATA(inode));
++	return single_open(file, vdec_proc_show, pde_data(inode));
+ }
+ 
+ static ssize_t vdec_proc_write(struct file *file, const char __user *user_buf,
+diff -ruN a/cvi_vc_drv/jpeg/cvi_jpg_interface/src/cvi_jpg_enc_internal.c b/cvi_vc_drv/jpeg/cvi_jpg_interface/src/cvi_jpg_enc_internal.c
+--- a/cvi_vc_drv/jpeg/cvi_jpg_interface/src/cvi_jpg_enc_internal.c
++++ b/cvi_vc_drv/jpeg/cvi_jpg_interface/src/cvi_jpg_enc_internal.c
+@@ -1512,8 +1512,7 @@
+ 	pJpgInst = (JpgEncHandle)jpgHandle;
+ 	pEncInfo = &pJpgInst->JpgInfo.encInfo;
+ 
+-	if (NULL == pEncInfo->pFrame)
+-		return JPG_RET_WRONG_CALL_SEQUENCE;
++	/* 7.2 port: pFrame is an array, the vendor NULL check was always false */
+ 	if (NULL == data)
+ 		return JPG_RET_INVALID_PARAM;
+ 
+diff -ruN a/cvi_vc_drv/jpeg/jpuapi/jpuapifunc.c b/cvi_vc_drv/jpeg/jpuapi/jpuapifunc.c
+--- a/cvi_vc_drv/jpeg/jpuapi/jpuapifunc.c
++++ b/cvi_vc_drv/jpeg/jpuapi/jpuapifunc.c
+@@ -2236,7 +2236,7 @@
+ 
+ JpgRet JpgEnterLock(void)
+ {
+-	mutex_lock_interruptible(&jpgLock);
++	mutex_lock(&jpgLock); /* 7.2 port: result was ignored */
+ 
+ 	return JPG_RET_SUCCESS;
+ }
+diff -ruN a/cvi_vc_drv/module/include/module_common.h b/cvi_vc_drv/module/include/module_common.h
+--- a/cvi_vc_drv/module/include/module_common.h
++++ b/cvi_vc_drv/module/include/module_common.h
+@@ -14,7 +14,9 @@
+ 
+ #define MUTEX_INIT(MUTEX_HANDLE, ATTR) mutex_init(MUTEX_HANDLE)
+ #define MUTEX_DESTROY(MUTEX_HANDLE) mutex_destroy(MUTEX_HANDLE)
+-#define MUTEX_LOCK(MUTEX_HANDLE) mutex_lock_interruptible(MUTEX_HANDLE)
++/* 7.2 port: mutex_lock_interruptible is __must_check and many callers ignore
++ * it (then unlock a mutex they never took); take it uninterruptibly instead */
++#define MUTEX_LOCK(MUTEX_HANDLE) ({ mutex_lock(MUTEX_HANDLE); 0; })
+ #define MUTEX_UNLOCK(MUTEX_HANDLE) mutex_unlock(MUTEX_HANDLE)
+ #define MEM_MALLOC(SIZE) vmalloc(SIZE)
+ #define MEM_CALLOC(NUMBER, SIZE) vzalloc(SIZE * NUMBER)
+diff -ruN a/cvi_vc_drv/module/src/cvi_vdec.c b/cvi_vc_drv/module/src/cvi_vdec.c
+--- a/cvi_vc_drv/module/src/cvi_vdec.c
++++ b/cvi_vc_drv/module/src/cvi_vdec.c
+@@ -1085,13 +1085,10 @@
+ 	cviGetDebugConfigFromDecProc();
+ 
+ 	if (IF_WANNA_ENABLE_BIND_MODE()) {
+-		struct sched_param param = {
+-			.sched_priority = 95,
+-		};
+ 		pVbCtx->currBindMode = CVI_TRUE;
+ 		pVbCtx->thread = kthread_run(vdec_event_handler,
+ 				(CVI_VOID *) pChnHandle, "vdec_handler%d", VdChn);
+-		sched_setscheduler(pVbCtx->thread, SCHED_RR, &param);
++		sched_set_fifo(pVbCtx->thread); /* 7.2 port: sched_setscheduler is not exported */
+ 	}
+ 
+ 
+diff -ruN a/cvi_vc_drv/module/src/cvi_venc.c b/cvi_vc_drv/module/src/cvi_venc.c
+--- a/cvi_vc_drv/module/src/cvi_venc.c
++++ b/cvi_vc_drv/module/src/cvi_venc.c
+@@ -3076,9 +3076,6 @@
+ 	MUTEX_UNLOCK(&pChnHandle->chnMutex);
+ 
+ 	if (IF_WANNA_ENABLE_BIND_MODE()) {
+-		struct sched_param param = {
+-			.sched_priority = 95,
+-		};
+ 
+ 		pVbCtx->currBindMode = CVI_TRUE;
+ 		pChnHandle->bChnEnable = CVI_TRUE;
+@@ -3100,7 +3097,7 @@
+ 					VeChn);
+ 				return CVI_FAILURE;
+ 			}
+-			sched_setscheduler(pVbCtx->thread, SCHED_RR, &param);
++			sched_set_fifo(pVbCtx->thread); /* 7.2 port: sched_setscheduler is not exported */
+ 			SEMA_POST(&pChnVars->sem_send);
+ 		}
+ 	}
+@@ -6939,9 +6936,6 @@
+ 			pChnHandle->sbm_state = VENC_SBM_STATE_IDLE;
+ 
+ 			if (!pSbmHandle->pSBMSendFrameThread) {
+-				struct sched_param param = {
+-					.sched_priority = 99,
+-				};
+ 
+ 				pSbmHandle->pSBMSendFrameThread = kthread_run(venc_sbm_send_frame_thread,
+ 								(CVI_VOID *)NULL, "cvitask_vc_sb");
+@@ -6951,7 +6945,7 @@
+ 						priChn);
+ 					goto SBM_CB_FAILURE;
+ 				}
+-				sched_setscheduler(pSbmHandle->pSBMSendFrameThread, SCHED_RR, &param);
++				sched_set_fifo(pSbmHandle->pSBMSendFrameThread); /* 7.2 port: sched_setscheduler is not exported */
+ 			}
+ 		}
+ 
+diff -ruN a/cvi_vc_drv/vcodec/sample/main_enc_cvitest.c b/cvi_vc_drv/vcodec/sample/main_enc_cvitest.c
+--- a/cvi_vc_drv/vcodec/sample/main_enc_cvitest.c
++++ b/cvi_vc_drv/vcodec/sample/main_enc_cvitest.c
+@@ -1023,9 +1023,6 @@
+ 	pTestEnc->bIsEncoderInited = TRUE;
+ 
+ 	if (pEncCfg->bIsoSendFrmEn && !pTestEnc->tPthreadId) {
+-		struct sched_param param = {
+-			.sched_priority = 95,
+-		};
+ 
+ 		init_completion(&pTestEnc->semSendEncCmd);
+ 		init_completion(&pTestEnc->semGetStreamCmd);
+@@ -1037,7 +1034,7 @@
+ 			CVI_VC_ERR("WaitEncodeDone task error!\n");
+ 			return RETCODE_FAILURE;
+ 		}
+-		sched_setscheduler(pTestEnc->tPthreadId, SCHED_FIFO, &param);
++		sched_set_fifo(pTestEnc->tPthreadId); /* 7.2 port: sched_setscheduler is not exported */
+ 	}
+ 
+ 	return INIT_TEST_ENCODER_OK;
+@@ -6376,9 +6373,6 @@
+ 	struct task_struct *thread_id[MAX_NUM_INSTANCE];
+ 	int ret = 0;
+ 	int i = 0;
+-	struct sched_param param = {
+-				.sched_priority = 80,
+-			};
+ 
+ 	for (i = 0; i < MAX_NUM_INSTANCE; i++) {
+ 		pEncConfig[i] = osal_malloc(sizeof(TestEncConfig));
+@@ -6421,7 +6415,7 @@
+ 			ret = 0;
+ 			goto BAILOUT;
+ 		}
+-		sched_setscheduler(thread_id[i], SCHED_RR, &param);
++		sched_set_fifo(thread_id[i]); /* 7.2 port: sched_setscheduler is not exported */
+ 	}
+ 
+ 	for (i = 0; i < gNumInstance; i++) {
+diff -ruN a/cvi_vc_drv/vcodec/vdi/linux/vdi.c b/cvi_vc_drv/vcodec/vdi/linux/vdi.c
+--- a/cvi_vc_drv/vcodec/vdi/linux/vdi.c
++++ b/cvi_vc_drv/vcodec/vdi/linux/vdi.c
+@@ -33,7 +33,9 @@
+ typedef struct mutex MUTEX_HANDLE;
+ #define MUTEX_INIT(P_MUTEX_HANDLE, ATTR) mutex_init(P_MUTEX_HANDLE)
+ #define MUTEX_DESTROY(P_MUTEX_HANDLE) mutex_destroy(P_MUTEX_HANDLE)
+-#define MUTEX_LOCK(P_MUTEX_HANDLE) mutex_lock_interruptible(P_MUTEX_HANDLE)
++/* 7.2 port: mutex_lock_interruptible is __must_check and many callers ignore
++ * it (then unlock a mutex they never took); take it uninterruptibly instead */
++#define MUTEX_LOCK(P_MUTEX_HANDLE) ({ mutex_lock(P_MUTEX_HANDLE); 0; })
+ #define MUTEX_UNLOCK(P_MUTEX_HANDLE) mutex_unlock(P_MUTEX_HANDLE)
+ 
+ #ifndef CVI_H26X_USE_ION_FW_BUFFER
+@@ -1664,7 +1666,7 @@
+ 		vb->base = vdi->vdb_bitstream.base;
+ 		vb->virt_addr = vdi->vdb_bitstream.virt_addr;
+ 	} else {
+-		strncpy(ionName, "singleEsBuf", MAX_VPU_ION_BUFFER_NAME);
++		strscpy(ionName, "singleEsBuf", MAX_VPU_ION_BUFFER_NAME);
+ 		if (VDI_ALLOCATE_MEMORY(core_idx, vb, bBsStreamCached,
+ 					ionName) < 0) {
+ 			CVI_VC_ERR(
+diff -ruN a/cvi_vc_drv/vcodec/vdi/linux/vdi_osal.c b/cvi_vc_drv/vcodec/vdi/linux/vdi_osal.c
+--- a/cvi_vc_drv/vcodec/vdi/linux/vdi_osal.c
++++ b/cvi_vc_drv/vcodec/vdi/linux/vdi_osal.c
+@@ -36,7 +36,6 @@
+ 
+ struct cvi_osal_file {
+ 	struct file *filep;
+-	mm_segment_t old_fs;
+ };
+ 
+ 
+@@ -222,7 +221,6 @@
+ 		return NULL;
+ 	}
+ 
+-	cvi_fp->old_fs = get_fs();
+ 	return cvi_fp;
+ }
+ size_t osal_fwrite(const void *p, int size, int count, osal_file_t fp)
+@@ -267,7 +265,6 @@
+ 
+ 	filep = cvi_fp->filep;
+ 	filp_close(filep, 0);
+-	set_fs(cvi_fp->old_fs);
+ 	vfree(cvi_fp);
+ 	return 0;
+ }
+diff -ruN a/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h b/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
+--- a/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
++++ b/cvi_vc_drv/vcodec/vpuapi/coda9/980_roi_rc_lib/hevc_enc_rc.h
+@@ -6,8 +6,13 @@
+ #define MAX_GOP_SIZE 8
+ #define PARA_CHANGE_RC_SEQ_INIT
+ 
++/* 7.2 port: <linux/minmax.h> already defines MIN/MAX */
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b)) ? (a) : (b))
++#endif
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b)) ? (a) : (b))
++#endif
+ #define CLIP3(a, b, c) (MIN(b, MAX(a, c)))
+ #define ABS(a) ((a >= 0) ? a : -a)
+ 
+diff -ruN a/cvi_vc_drv/vcodec/vpuapi/vpuapifunc.c b/cvi_vc_drv/vcodec/vpuapi/vpuapifunc.c
+--- a/cvi_vc_drv/vcodec/vpuapi/vpuapifunc.c
++++ b/cvi_vc_drv/vcodec/vpuapi/vpuapifunc.c
+@@ -1634,14 +1634,15 @@
+ 	if (!vip)
+ 		return;
+ 
+-	if (inst)
++	if (inst) {
+ 		CVI_VC_TRACE(
+ 			"coreIdx %d, set pending inst = %p, inst->instIndex %d, s_n %s, s_line %d\n",
+ 			coreIdx, inst, inst->instIndex, caller_fn, caller_line);
+-	else
++	} else {
+ 		CVI_VC_TRACE(
+ 			"coreIdx %d, clear pending inst, s_n %s, s_line %d\n",
+ 			coreIdx, caller_fn, caller_line);
++	}
+ 
+ 	vip->pendingInst = inst;
+ 	if (inst)
+diff -ruN a/include/common/kapi/vb.h b/include/common/kapi/vb.h
+--- a/include/common/kapi/vb.h
++++ b/include/common/kapi/vb.h
+@@ -29,6 +29,7 @@
+ int32_t vb_get_config(struct cvi_vb_cfg *pstVbConfig);
+ 
+ int32_t vb_create_pool(struct cvi_vb_pool_cfg *config);
++CVI_S32 vb_create_ex_pool(struct cvi_vb_pool_ex_cfg *config);	/* 7.2 port: prototype */
+ int32_t vb_destroy_pool(uint32_t poolId);
+ 
+ VB_BLK vb_physAddr2Handle(uint64_t u64PhyAddr);
+diff -ruN a/jpeg/cvi_jpeg.c b/jpeg/cvi_jpeg.c
+--- a/jpeg/cvi_jpeg.c
++++ b/jpeg/cvi_jpeg.c
+@@ -18,6 +18,7 @@
+ #include <linux/uaccess.h>
+ #include <linux/cdev.h>
+ #include <linux/slab.h>
++#include <linux/vmalloc.h> /* 7.2 port: no longer pulled in indirectly */
+ #include <linux/sched.h>
+ #include <linux/of.h>
+ #include <linux/of_address.h>
+@@ -25,7 +26,7 @@
+ #include <linux/of_device.h>
+ #include <linux/reset.h>
+ #include <linux/of_reserved_mem.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+ #include <linux/sched/signal.h>
+@@ -58,7 +59,7 @@
+ #define MJPEG_PIC_STATUS_REG 0x4
+ #define MJPEG_INTR_MASK_REG  0x0C0
+ 
+-static DEFINE_SEMAPHORE(s_jpu_sem);
++static DEFINE_SEMAPHORE(s_jpu_sem, 1); /* 7.2 port: count is explicit */
+ 
+ int jpu_mask = JPU_MASK_ERR;
+ module_param(jpu_mask, int, 0644);
+@@ -509,7 +510,7 @@
+ {
+ 	int err = 0;
+ 
+-	jdev->jpu_class = class_create(THIS_MODULE, JPU_CLASS_NAME);
++	jdev->jpu_class = class_create(JPU_CLASS_NAME);
+ 	if (IS_ERR(jdev->jpu_class)) {
+ 		pr_err("create class failed\n");
+ 		return PTR_ERR(jdev->jpu_class);
+@@ -578,7 +579,8 @@
+ }
+ #endif // #ifndef USE_VMALLOC_FOR_INSTANCE_POOL_MEMORY
+ 
+-static int jpu_remove(struct platform_device *pdev)
++/* 7.2 port: platform_driver.remove returns void */
++static void jpu_remove(struct platform_device *pdev)
+ {
+ 	struct cvi_jpu_device *jdev = platform_get_drvdata(pdev);
+ 
+@@ -614,7 +616,6 @@
+ 		jdev->jpu_control_register.virt_addr = 0x00;
+ 	}
+ 
+-	return 0;
+ }
+ 
+ static void cvi_jpu_unregister_cdev(struct platform_device *pdev)
+diff -ruN a/jpeg/jmm.h b/jpeg/jmm.h
+--- a/jpeg/jmm.h
++++ b/jpeg/jmm.h
+@@ -140,7 +140,10 @@
+ 			JPU_DBG_MEM("VMEM_ASSERT at %s:%d\n", __FILE__, __LINE__);	\
+ 	} while (0)
+ #define VMEM_HEIGHT(_tree) (_tree == NULL ? -1 : _tree->height)
++/* 7.2 port: <linux/minmax.h> already defines MAX */
++#ifndef MAX
+ #define MAX(_a, _b) (_a >= _b ? _a : _b)
++#endif
+ 
+ struct avl_node_data_struct {
+ 	int key;
+diff -ruN a/snsr_i2c/common/snsr_i2c.c b/snsr_i2c/common/snsr_i2c.c
+--- a/snsr_i2c/common/snsr_i2c.c
++++ b/snsr_i2c/common/snsr_i2c.c
+@@ -3,7 +3,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/of_platform.h>
+ #include <linux/of_reserved_mem.h>
+-#include <linux/of_gpio.h>
++/* 7.2 port: <linux/of_gpio.h> is gone (and unused here) */
+ #include <linux/platform_device.h>
+ #include <linux/delay.h>
+ #include <linux/iommu.h>
+@@ -23,6 +23,23 @@
+ static int snsr_i2c_dbg = SNSR_I2C_DBG_DISABLE;
+ module_param(snsr_i2c_dbg, int, 0644);
+ 
++/*
++ * 7.2 port: one i2c_transfer() per message, i.e. a STOP after each register
++ * write (the vendor got this from its I2C_M_WRSTOP flag in a single
++ * transfer). Returns the number of messages sent, or a negative errno.
++ */
++static int snsr_i2c_burst_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs, int num)
++{
++	int i, ret;
++
++	for (i = 0; i < num; i++) {
++		ret = i2c_transfer(adap, &msgs[i], 1);
++		if (ret != 1)
++			return ret < 0 ? ret : -EIO;
++	}
++	return num;
++}
++
+ static struct i2c_board_info cvi_info = {
+ 	I2C_BOARD_INFO("sensor_i2c", (0x7b >> 1)),
+ };
+@@ -134,7 +151,14 @@
+ 	msg->addr = i2c->dev_addr;
+ 	msg->buf = tx;
+ 	msg->len = idx;
+-	msg->flags = I2C_M_WRSTOP;
++	/*
++	 * 7.2 port: I2C_M_WRSTOP was a vendor extension (its i2c-designware
++	 * issued a STOP after each write of a multi-message transfer). Mainline
++	 * has none; snsr_i2c_burst_xfer() sends each message on its own
++	 * transfer instead, so each register write still ends with a STOP
++	 * (SCCB sensors such as the OV5647 do not take repeated starts).
++	 */
++	msg->flags = 0;
+ 
+ 	ctx->addr_bytes = i2c->addr_bytes;
+ 	ctx->data_bytes = i2c->data_bytes;
+@@ -293,7 +317,7 @@
+ 		do_gettimeofday(&tv);
+ 		t1 = tv.tv_sec * 1000000 + tv.tv_usec;
+ #endif
+-		ret = i2c_transfer(adap, ctx->msg, ctx->msg_idx);
++		ret = snsr_i2c_burst_xfer(adap, ctx->msg, ctx->msg_idx);
+ 		if (ret == ctx->msg_idx) {
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+ 			ktime_get_real_ts64(&ts);
+@@ -364,20 +388,30 @@
+ 		i2c_adap = i2c_get_adapter(i);
+ 		if (!i2c_adap)
+ 			continue;
+-		dev_info(&pdev->dev, "i2c:-------hook %d\n", i2c_adap->i2c_idx);
+-		if (i2c_adap->i2c_idx < I2C_MAX_NUM) {
+-			ctx = &dev->ctx[i2c_adap->i2c_idx];
++		/*
++		 * 7.2 port: i2c_idx was a field the vendor kernel added to
++		 * struct i2c_adapter (the bus index); mainline has adap->nr,
++		 * which the DT aliases (i2cN) fix to the same numbering.
++		 */
++		dev_info(&pdev->dev, "i2c:-------hook %d\n", i2c_adap->nr);
++		if (i2c_adap->nr < I2C_MAX_NUM) {
++			ctx = &dev->ctx[i2c_adap->nr];
+ 			if (!ctx->client) {
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+ 				ctx->client = i2c_new_client_device(i2c_adap, &cvi_info);
+-#else
+-				ctx->client = i2c_new_device(i2c_adap, &cvi_info);
+-#endif
++				/* 7.2 port: ERR_PTR on failure (e.g. address busy),
++				 * not NULL: never keep it as a client */
++				if (IS_ERR(ctx->client)) {
++					dev_warn(&pdev->dev, "i2c-%d: no handle client (%ld)\n",
++						 i2c_adap->nr, PTR_ERR(ctx->client));
++					ctx->client = NULL;
++					i2c_put_adapter(i2c_adap);
++					continue;
++				}
+ 				ctx->buf = kmalloc(I2C_BUF_SIZE, GFP_KERNEL);
+ 				if (!ctx->buf)
+ 					return -ENOMEM;
+ 			} else
+-				dev_err(&pdev->dev, "duplicate i2c_adpa idx %d\n", i2c_adap->i2c_idx);
++				dev_err(&pdev->dev, "duplicate i2c_adpa idx %d\n", i2c_adap->nr);
+ 
+ 		}
+ 		i2c_put_adapter(i2c_adap);
+@@ -417,20 +451,15 @@
+ 	return 0;
+ }
+ 
+-static int cvi_snsr_i2c_remove(struct platform_device *pdev)
++static void cvi_snsr_i2c_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	struct cvi_i2c_dev *dev;
+ 	int i = 0;
+ 
+-	if (!pdev) {
+-		dev_err(&pdev->dev, "invalid param");
+-		return -EINVAL;
+-	}
+-
+ 	dev = dev_get_drvdata(&pdev->dev);
+ 	if (!dev) {
+ 		dev_err(&pdev->dev, "Can not get cvi_snsr drvdata");
+-		return 0;
++		return;
+ 	}
+ 
+ 	for (i = 0; i < I2C_MAX_NUM; i++) {
+@@ -443,8 +472,6 @@
+ 	}
+ 
+ 	dev_set_drvdata(&pdev->dev, NULL);
+-
+-	return 0;
+ }
+ 
+ static void cvi_snsr_i2c_pdev_release(struct device *dev)
+diff -ruN a/sys/common/sys.c b/sys/common/sys.c
+--- a/sys/common/sys.c
++++ b/sys/common/sys.c
+@@ -7,6 +7,7 @@
+ #include <asm/cacheflush.h>
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+ #include <linux/dma-map-ops.h>
++#include <linux/dma-mapping.h>
+ #endif
+ 
+ #include "sys_context.h"
+@@ -17,6 +18,7 @@
+ #include <base_cb.h>
+ #include <vi_cb.h>
+ #include <vpss_cb.h>
++#include <sys_k.h>	/* 7.2 port: sys_save_modules_cb() prototype */
+ 
+ enum enum_cache_op {
+ 	enum_cache_op_invalid,
+@@ -62,9 +64,9 @@
+ 
+ 	owner_name = vmalloc(MAX_ION_BUFFER_NAME);
+ 	if (name)
+-		strncpy(owner_name, name, MAX_ION_BUFFER_NAME);
++		strscpy(owner_name, name, MAX_ION_BUFFER_NAME);
+ 	else
+-		strncpy(owner_name, "anonymous", MAX_ION_BUFFER_NAME);
++		strscpy(owner_name, "anonymous", MAX_ION_BUFFER_NAME);
+ 
+ 	ionbuf->name = owner_name;
+ 
+@@ -139,9 +141,9 @@
+ 	ionbuf = (struct ion_buffer *)dmabuf->priv;
+ 	owner_name = vmalloc(MAX_ION_BUFFER_NAME);
+ 	if (name)
+-		strncpy(owner_name, name, MAX_ION_BUFFER_NAME);
++		strscpy(owner_name, name, MAX_ION_BUFFER_NAME);
+ 	else
+-		strncpy(owner_name, "anonymous", MAX_ION_BUFFER_NAME);
++		strscpy(owner_name, "anonymous", MAX_ION_BUFFER_NAME);
+ 
+ 	ionbuf->name = owner_name;
+ 
+@@ -380,9 +382,38 @@
+ }
+ EXPORT_SYMBOL_GPL(sys_ion_get_memory_state);
+ 
++/*
++ * 7.2 port: arch_sync_dma_for_device() is not exported to modules; the DMA
++ * API reaches it for the sys platform device, which sits under the
++ * dma-noncoherent soc node (no IOMMU: dma address == physical address).
++ * Set at probe; the exported cache helpers are used by vi/vpss afterwards.
++ */
++static struct device *sys_dma_dev;
++
++static void sys_sync_for_device(u64 addr_p, u32 len, enum dma_data_direction dir)
++{
++	if (WARN_ONCE(!sys_dma_dev, "cvi sys: cache op before probe\n"))
++		return;
++	dma_sync_single_for_device(sys_dma_dev, (dma_addr_t)addr_p, len, dir);
++}
++
++/*
++ * 7.2 port: the vendor "invalidate" (arch_sync_dma_for_device FROM_DEVICE on
++ * its 5.10) discarded the lines. On 7.2 riscv, for_device(FROM_DEVICE) only
++ * cleans (arch_sync_dma_clean_before_fromdevice); the invalidate is done by
++ * for_cpu. Without it the CPU read stale data the hardware had overwritten
++ * (corrupt H.264 PPS, F7 step 8).
++ */
++static void sys_invalidate_for_cpu(u64 addr_p, u32 len)
++{
++	if (WARN_ONCE(!sys_dma_dev, "cvi sys: cache op before probe\n"))
++		return;
++	dma_sync_single_for_cpu(sys_dma_dev, (dma_addr_t)addr_p, len, DMA_FROM_DEVICE);
++}
++
+ CVI_S32 sys_cache_invalidate(CVI_U64 addr_p, void *addr_v, CVI_U32 u32Len)
+ {
+-	arch_sync_dma_for_device(addr_p, u32Len, DMA_FROM_DEVICE);
++	sys_invalidate_for_cpu(addr_p, u32Len);
+ 
+ 	/*	*/
+ 	smp_mb();
+@@ -392,7 +423,7 @@
+ 
+ CVI_S32 sys_cache_flush(CVI_U64 addr_p, void *addr_v, CVI_U32 u32Len)
+ {
+-	arch_sync_dma_for_device(addr_p, u32Len, DMA_TO_DEVICE);
++	sys_sync_for_device(addr_p, u32Len, DMA_TO_DEVICE);
+ 
+ 	/*  */
+ 	smp_mb();
+@@ -412,9 +443,9 @@
+ 	}
+ 
+ 	if (op_code == enum_cache_op_invalid)
+-		arch_sync_dma_for_device(ioctl_arg.addr_p, ioctl_arg.size, DMA_FROM_DEVICE);
++		sys_invalidate_for_cpu(ioctl_arg.addr_p, ioctl_arg.size);
+ 	else if (op_code == enum_cache_op_flush)
+-		arch_sync_dma_for_device(ioctl_arg.addr_p, ioctl_arg.size, DMA_TO_DEVICE);
++		sys_sync_for_device(ioctl_arg.addr_p, ioctl_arg.size, DMA_TO_DEVICE);
+ 
+ 	/*	*/
+ 	smp_mb();
+@@ -552,7 +583,7 @@
+ }
+ EXPORT_SYMBOL_GPL(sys_save_modules_cb);
+ 
+-int _sys_exe_module_cb(struct base_exe_m_cb *exe_cb)
++static int _sys_exe_module_cb(struct base_exe_m_cb *exe_cb)
+ {
+ 	struct base_m_cb_info *cb_info;
+ 
+@@ -861,7 +892,7 @@
+ #endif
+ };
+ 
+-int cvi_sys_register_misc(struct cvi_sys_device *ndev)
++static int cvi_sys_register_misc(struct cvi_sys_device *ndev)
+ {
+ 	int rc;
+ 
+@@ -890,6 +921,11 @@
+ 		return -ENOMEM;
+ 	ndev->dev = dev;
+ 
++	ret = dma_set_mask_and_coherent(dev, DMA_BIT_MASK(64));
++	if (ret)
++		return ret;
++	sys_dma_dev = dev;
++
+ 	mutex_init(&ndev->dev_lock);
+ 	spin_lock_init(&ndev->close_lock);
+ 	ndev->use_count = 0;
+@@ -908,7 +944,7 @@
+ 	return 0;
+ }
+ 
+-static int cvi_sys_remove(struct platform_device *pdev)
++static void cvi_sys_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	struct cvi_sys_device *ndev = platform_get_drvdata(pdev);
+ 
+@@ -916,8 +952,6 @@
+ 
+ 	misc_deregister(&ndev->miscdev);
+ 	platform_set_drvdata(pdev, NULL);
+-
+-	return 0;
+ }
+ 
+ static const struct of_device_id cvitek_sys_match[] = {
+@@ -940,4 +974,5 @@
+ MODULE_AUTHOR("Wellken Chen<wellken.chen@cvitek.com.tw>");
+ MODULE_DESCRIPTION("Cvitek SoC SYS driver");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("DMA_BUF");	/* 7.2: dma_buf_* are namespaced */
+ 
+diff -ruN a/tpu/common/cvi_tpu_interface.c b/tpu/common/cvi_tpu_interface.c
+--- a/tpu/common/cvi_tpu_interface.c
++++ b/tpu/common/cvi_tpu_interface.c
+@@ -33,6 +33,7 @@
+ #include <linux/dma-mapping.h>
+ #include <linux/kthread.h>
+ #include <linux/slab.h>
++#include <linux/vmalloc.h> /* 7.2 port: no longer pulled in indirectly */
+ #include <linux/clk.h>
+ #include <asm/cacheflush.h>
+ #include <linux/of.h>
+@@ -128,7 +129,7 @@
+ #if (KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE)
+ static void legacy_timer_emu_func(struct timer_list *t)
+ {
+-	struct legacy_timer_emu *lt = from_timer(lt, t, t);
++	struct legacy_timer_emu *lt = timer_container_of(lt, t, t) /* 7.2 port: from_timer renamed */;
+ 
+ 	lt->function(lt->data);
+ }
+@@ -190,11 +191,11 @@
+ {
+ #if (KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE)
+ 	if (timer_pending(&profile_timer.t)) {
+-		del_timer_sync(&profile_timer.t);
++		timer_delete_sync(&profile_timer.t);
+ 		timer_setup(&profile_timer.t, legacy_timer_emu_func, 0);
+ #else
+ 	if (timer_pending(&profile_timer)) {
+-		del_timer_sync(&profile_timer);
++		timer_delete_sync(&profile_timer);
+ 		init_timer(&profile_timer);
+ #endif
+ 	}
+@@ -258,7 +259,7 @@
+ 
+ static int tpu_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, tpu_proc_show, PDE_DATA(inode));
++	return single_open(file, tpu_proc_show, pde_data(inode));
+ }
+ 
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+@@ -331,7 +332,7 @@
+ 
+ 	node->dmabuf_paddr = buffer->paddr;
+ 	fp = (struct file *)(node->dma_buf->file);
+-	pr_debug("p=0x%llx, ref_count=%lld\n", (uint64_t)node->dmabuf_paddr, file_count(fp));
++	pr_debug("p=0x%llx, ref_count=%ld\n", (uint64_t)node->dmabuf_paddr, file_count(fp));
+ 
+ 	// Check parameters
+ 	header = (struct dma_hdr_t *)node->dmabuf_vaddr;
+@@ -340,7 +341,7 @@
+ 	}
+ 
+ 	if (node->dmabuf_paddr & 0xFFF) {
+-		pr_err("error: dmabuf_paddr=0x%p\n", node->dmabuf_paddr);
++		pr_err("error: dmabuf_paddr=0x%llx\n", node->dmabuf_paddr);
+ 	}
+ 
+ 	return 0;
+@@ -356,7 +357,7 @@
+ 		dma_buf_end_cpu_access(node->dma_buf, DMA_TO_DEVICE);
+ 		dma_buf_put(node->dma_buf);
+ 		fp = (struct file *)(node->dma_buf->file);
+-		pr_debug("ref_count=%lld\n", file_count(fp));
++		pr_debug("ref_count=%ld\n", file_count(fp));
+ 
+ 	}
+ }
+@@ -940,13 +941,14 @@
+ 		goto err_attach;
+ 	}
+ 
+-	sgt = dma_buf_map_attachment(attachment, direction);
++	/* 7.2 port: the plain variant needs the dma_resv lock held (6.2+) */
++	sgt = dma_buf_map_attachment_unlocked(attachment, direction);
+ 	if (IS_ERR(sgt)) {
+ 		ret = -EINVAL;
+ 		goto err_map;
+ 	}
+ 
+-	dma_buf_unmap_attachment(attachment, sgt, direction);
++	dma_buf_unmap_attachment_unlocked(attachment, sgt, direction);
+ 
+ err_map:
+ 	dma_buf_detach(dma_buf, attachment);
+@@ -967,11 +969,9 @@
+ 		dev_err(ndev->dev, "copy c user fail\n");
+ 		return ret;
+ 	}
+-#if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE) && defined(__riscv)
+-	arch_sync_dma_for_device(flush_arg.paddr, flush_arg.size, DMA_TO_DEVICE);
+-#else
+-	__dma_map_area(phys_to_virt(flush_arg.paddr), flush_arg.size, DMA_TO_DEVICE);
+-#endif
++	/* 7.2 port: arch_sync_dma_for_device() is not exported; the DMA API
++	 * reaches it for this device (soc is dma-noncoherent, no IOMMU) */
++	dma_sync_single_for_device(ndev->dev, (dma_addr_t)flush_arg.paddr, flush_arg.size, DMA_TO_DEVICE);
+ 
+ 	smp_mb();	/*memory barrier*/
+ 	return 0;
+@@ -988,11 +988,9 @@
+ 		dev_err(ndev->dev, "copy from user fail\n");
+ 		return ret;
+ 	}
+-#if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE) && defined(__riscv)
+-	arch_sync_dma_for_device(invalidate_arg.paddr, invalidate_arg.size, DMA_FROM_DEVICE);
+-#else
+-	__dma_map_area(phys_to_virt(invalidate_arg.paddr), invalidate_arg.size, DMA_FROM_DEVICE);
+-#endif
++	/* 7.2 port: the invalidate is for_cpu -- on 7.2 riscv,
++	 * for_device(FROM_DEVICE) only cleans the lines (docs/F7, step 8) */
++	dma_sync_single_for_cpu(ndev->dev, (dma_addr_t)invalidate_arg.paddr, invalidate_arg.size, DMA_FROM_DEVICE);
+ 
+ 	smp_mb();	/*memory barrier*/
+ 	return 0;
+@@ -1117,7 +1115,7 @@
+ {
+ 	int ret;
+ 
+-	npu_class = class_create(THIS_MODULE, CVI_TPU_CLASS_NAME);
++	npu_class = class_create(CVI_TPU_CLASS_NAME);
+ 	if (IS_ERR(npu_class)) {
+ 		pr_err("create class failed\n");
+ 		return PTR_ERR(npu_class);
+@@ -1196,6 +1194,17 @@
+ 		ndev->clk_tpu_fab = NULL;
+ 	}
+ 
++	/*
++	 * 7.2 port: the vendor never enables these (they stayed on from the
++	 * boot loader); mainline clk_disable_unused gates them at the end of
++	 * boot (enable_count 0 measured), and a TPU register access with the
++	 * clock off hangs the SoC. Kept on while the driver is bound.
++	 */
++	if (ndev->clk_tpu_axi)
++		clk_prepare_enable(ndev->clk_tpu_axi);
++	if (ndev->clk_tpu_fab)
++		clk_prepare_enable(ndev->clk_tpu_fab);
++
+ 	//get reset related
+ 	ndev->rst_tdma = devm_reset_control_get(&pdev->dev, "res_tdma");
+ 	if (IS_ERR(ndev->rst_tdma)) {
+@@ -1247,7 +1256,8 @@
+ 	return 0;
+ }
+ 
+-static int cvi_tpu_remove(struct platform_device *pdev)
++/* 7.2 port: platform_driver.remove returns void */
++static void cvi_tpu_remove(struct platform_device *pdev)
+ {
+ 	struct cvi_tpu_device *ndev = platform_get_drvdata(pdev);
+ 	struct cvi_kernel_work *kernel_work = &ndev->kernel_work;
+@@ -1256,6 +1266,10 @@
+ 
+ 	//put clock related
+ 	if (ndev->clk_tpu_axi)
++		clk_disable_unprepare(ndev->clk_tpu_axi);
++	if (ndev->clk_tpu_fab)
++		clk_disable_unprepare(ndev->clk_tpu_fab);
++	if (ndev->clk_tpu_axi)
+ 		devm_clk_put(&pdev->dev, ndev->clk_tpu_axi);
+ 
+ 	if (ndev->clk_tpu_fab)
+@@ -1275,7 +1289,6 @@
+ 
+ 	//remove tpu proc
+ 	proc_remove(tpu_proc_dir);
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+@@ -1327,3 +1340,4 @@
+ MODULE_AUTHOR("Wellken Chen<wellken.chen@cvitek.com.tw>");
+ MODULE_DESCRIPTION("Cvitek SoC TPU driver");
+ MODULE_LICENSE("GPL");
++MODULE_IMPORT_NS("DMA_BUF"); /* 7.2 port: dma-buf symbols are namespaced */
+diff -ruN a/tpu/hal/cv181x/tpu_platform.c b/tpu/hal/cv181x/tpu_platform.c
+--- a/tpu/hal/cv181x/tpu_platform.c
++++ b/tpu/hal/cv181x/tpu_platform.c
+@@ -11,7 +11,7 @@
+ #include <linux/delay.h>
+ #include <linux/clk.h>
+ #include <linux/reset.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/clk.h>
+ #include <asm/cacheflush.h>
+ 
+@@ -796,8 +796,9 @@
+ 	tdma_reg_t reg;
+ 	uint32_t pio_array[16] = {0};
+ 	int32_t ret = -1;
+-	unsigned long tdma_expire = jiffies + msecs_to_jiffies(TIMEOUT_MS);
+-	uint32_t reg_value = 0;
++	/* 7.2 port: only used by the vendor's disabled polling path */
++	unsigned long __maybe_unused tdma_expire = jiffies + msecs_to_jiffies(TIMEOUT_MS);
++	uint32_t __maybe_unused reg_value = 0;
+ 
+ 	reset_tdma_reg(&reg);
+ 	reinit_completion(&ndev->tdma_done);
+diff -ruN a/vcodec/cvi_vcodec.c b/vcodec/cvi_vcodec.c
+--- a/vcodec/cvi_vcodec.c
++++ b/vcodec/cvi_vcodec.c
+@@ -28,7 +28,10 @@
+ #include <linux/uaccess.h>
+ #include <linux/version.h>
+ #include <linux/wait.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only): no-op annotations */
++#define ANNOTATE_CHANNEL_COLOR(...) do { } while (0)
++#define ANNOTATE_CHANNEL_END(...) do { } while (0)
++#define ANNOTATE_NAME_CHANNEL(...) do { } while (0)
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 11, 0)
+ #include <linux/sched/signal.h>
+ #endif
+@@ -126,7 +129,7 @@
+ #if LINUX_VERSION_CODE < KERNEL_VERSION(2, 6, 36)
+ static DECLARE_MUTEX(s_vpu_sem);
+ #else
+-static DEFINE_SEMAPHORE(s_vpu_sem);
++static DEFINE_SEMAPHORE(s_vpu_sem, 1); /* 7.2 port: count is explicit */
+ #endif
+ static struct list_head s_vbp_head = LIST_HEAD_INIT(s_vbp_head);
+ static struct list_head s_inst_list_head = LIST_HEAD_INIT(s_inst_list_head);
+@@ -1402,7 +1405,7 @@
+ {
+ 	int err = 0;
+ 
+-	vdev->vpu_class = class_create(THIS_MODULE, VPU_CLASS_NAME);
++	vdev->vpu_class = class_create(VPU_CLASS_NAME);
+ 	if (IS_ERR(vdev->vpu_class)) {
+ 		VCODEC_DBG_ERR("create class failed\n");
+ 		return PTR_ERR(vdev->vpu_class);
+@@ -1568,7 +1571,8 @@
+ }
+ #endif
+ 
+-static int vpu_remove(struct platform_device *pdev)
++/* 7.2 port: platform_driver.remove returns void */
++static void vpu_remove(struct platform_device *pdev)
+ {
+ 	struct cvi_vpu_device *vdev = platform_get_drvdata(pdev);
+ 
+@@ -1608,14 +1612,13 @@
+ 
+ 	cviReleaseRegResource(vdev);
+ 
+-	return 0;
+ }
+ 
+ struct mutex vcodec_mutex;
+ 
+ void vcodec_lock(void)
+ {
+-	mutex_lock_interruptible(&vcodec_mutex);
++	mutex_lock(&vcodec_mutex); /* 7.2 port: result was ignored */
+ }
+ EXPORT_SYMBOL(vcodec_lock);
+ 
+diff -ruN a/vi/chip/cv180x/proc/vi_dbg_proc.c b/vi/chip/cv180x/proc/vi_dbg_proc.c
+--- a/vi/chip/cv180x/proc/vi_dbg_proc.c
++++ b/vi/chip/cv180x/proc/vi_dbg_proc.c
+@@ -168,7 +168,7 @@
+ 
+ static int vi_dbg_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, vi_dbg_proc_show, PDE_DATA(inode));
++	return single_open(file, vi_dbg_proc_show, pde_data(inode));
+ }
+ 
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+diff -ruN a/vi/chip/cv180x/proc/vi_isp_proc.c b/vi/chip/cv180x/proc/vi_isp_proc.c
+--- a/vi/chip/cv180x/proc/vi_isp_proc.c
++++ b/vi/chip/cv180x/proc/vi_isp_proc.c
+@@ -64,12 +64,12 @@
+ 
+ static int _isp_proc_open(struct inode *inode, struct file *file)
+ {
+-	struct cvi_vi_dev *vdev = PDE_DATA(inode);
++	struct cvi_vi_dev *vdev = pde_data(inode);
+ 
+ 	isp_prc_unit.isp_prc_int_flag = 0;
+ 	vi_event_queue(vdev, VI_EVENT_ISP_PROC_READ, 0);
+ 
+-	return single_open(file, _isp_proc_show, PDE_DATA(inode));
++	return single_open(file, _isp_proc_show, pde_data(inode));
+ }
+ 
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+diff -ruN a/vi/chip/cv180x/proc/vi_proc.c b/vi/chip/cv180x/proc/vi_proc.c
+--- a/vi/chip/cv180x/proc/vi_proc.c
++++ b/vi/chip/cv180x/proc/vi_proc.c
+@@ -339,7 +339,7 @@
+ 
+ static int _vi_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, _vi_proc_show, PDE_DATA(inode));
++	return single_open(file, _vi_proc_show, pde_data(inode));
+ }
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+ static const struct proc_ops _vi_proc_fops = {
+diff -ruN a/vi/chip/cv180x/vi.h b/vi/chip/cv180x/vi.h
+--- a/vi/chip/cv180x/vi.h
++++ b/vi/chip/cv180x/vi.h
+@@ -13,7 +13,7 @@
+ #include <linux/poll.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #if (KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE)
+ #include <uapi/linux/sched/types.h>
+diff -ruN a/vi/chip/cv180x/vi_isp_buf_ctrl.h b/vi/chip/cv180x/vi_isp_buf_ctrl.h
+--- a/vi/chip/cv180x/vi_isp_buf_ctrl.h
++++ b/vi/chip/cv180x/vi_isp_buf_ctrl.h
+@@ -13,7 +13,7 @@
+ #include <linux/poll.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #include <uapi/linux/sched/types.h>
+ #include <linux/vi_tun_cfg.h>
+diff -ruN a/vi/chip/cv181x/proc/vi_dbg_proc.c b/vi/chip/cv181x/proc/vi_dbg_proc.c
+--- a/vi/chip/cv181x/proc/vi_dbg_proc.c
++++ b/vi/chip/cv181x/proc/vi_dbg_proc.c
+@@ -168,7 +168,7 @@
+ 
+ static int vi_dbg_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, vi_dbg_proc_show, PDE_DATA(inode));
++	return single_open(file, vi_dbg_proc_show, pde_data(inode));
+ }
+ 
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+diff -ruN a/vi/chip/cv181x/proc/vi_isp_proc.c b/vi/chip/cv181x/proc/vi_isp_proc.c
+--- a/vi/chip/cv181x/proc/vi_isp_proc.c
++++ b/vi/chip/cv181x/proc/vi_isp_proc.c
+@@ -64,12 +64,12 @@
+ 
+ static int _isp_proc_open(struct inode *inode, struct file *file)
+ {
+-	struct cvi_vi_dev *vdev = PDE_DATA(inode);
++	struct cvi_vi_dev *vdev = pde_data(inode);
+ 
+ 	isp_prc_unit.isp_prc_int_flag = 0;
+ 	vi_event_queue(vdev, VI_EVENT_ISP_PROC_READ, 0);
+ 
+-	return single_open(file, _isp_proc_show, PDE_DATA(inode));
++	return single_open(file, _isp_proc_show, pde_data(inode));
+ }
+ 
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+diff -ruN a/vi/chip/cv181x/proc/vi_proc.c b/vi/chip/cv181x/proc/vi_proc.c
+--- a/vi/chip/cv181x/proc/vi_proc.c
++++ b/vi/chip/cv181x/proc/vi_proc.c
+@@ -50,26 +50,26 @@
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_BT601 ||
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_BT1120_STANDARD ||
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_BT1120_INTERLEAVED)
+-				memcpy(o, "BT", sizeof(o));
++				strscpy(o, "BT", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enIntfMode == VI_MODE_MIPI ||
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_MIPI_YUV420_NORMAL ||
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_MIPI_YUV420_LEGACY ||
+ 				pviProcCtx->devAttr[i].enIntfMode == VI_MODE_MIPI_YUV422)
+-				memcpy(o, "MIPI", sizeof(o));
++				strscpy(o, "MIPI", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enIntfMode == VI_MODE_LVDS)
+-				memcpy(o, "LVDS", sizeof(o));
++				strscpy(o, "LVDS", sizeof(o));
+ 
+ 			memset(p, 0, 8);
+ 			if (pviProcCtx->devAttr[i].enWorkMode == VI_WORK_MODE_1Multiplex)
+-				memcpy(p, "1MUX", sizeof(p));
++				strscpy(p, "1MUX", sizeof(p));
+ 			else if (pviProcCtx->devAttr[i].enWorkMode == VI_WORK_MODE_2Multiplex)
+-				memcpy(p, "2MUX", sizeof(p));
++				strscpy(p, "2MUX", sizeof(p));
+ 			else if (pviProcCtx->devAttr[i].enWorkMode == VI_WORK_MODE_3Multiplex)
+-				memcpy(p, "3MUX", sizeof(p));
++				strscpy(p, "3MUX", sizeof(p));
+ 			else if (pviProcCtx->devAttr[i].enWorkMode == VI_WORK_MODE_4Multiplex)
+-				memcpy(p, "4MUX", sizeof(p));
++				strscpy(p, "4MUX", sizeof(p));
+ 			else
+-				memcpy(p, "Other", sizeof(p));
++				strscpy(p, "Other", sizeof(p));
+ 
+ 			seq_printf(m, "\t%4s\t%4s\t%3s\n", o, p,
+ 				(pviProcCtx->devAttr[i].enScanMode == VI_SCAN_INTERLACED) ? "I" : "P");
+@@ -82,17 +82,17 @@
+ 		if (pviProcCtx->isDevEnable[i]) {
+ 			memset(o, 0, 8);
+ 			if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_VUVU)
+-				memcpy(o, "VUVU", sizeof(o));
++				strscpy(o, "VUVU", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_UVUV)
+-				memcpy(o, "UVUV", sizeof(o));
++				strscpy(o, "UVUV", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_UYVY)
+-				memcpy(o, "UYVY", sizeof(o));
++				strscpy(o, "UYVY", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_VYUY)
+-				memcpy(o, "VYUY", sizeof(o));
++				strscpy(o, "VYUY", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_YUYV)
+-				memcpy(o, "YUYV", sizeof(o));
++				strscpy(o, "YUYV", sizeof(o));
+ 			else if (pviProcCtx->devAttr[i].enDataSeq == VI_DATA_SEQ_YVYU)
+-				memcpy(o, "YVYU", sizeof(o));
++				strscpy(o, "YVYU", sizeof(o));
+ 
+ 			isRGB = (pviProcCtx->devAttr[i].enInputDataType == VI_DATA_TYPE_RGB);
+ 
+@@ -142,15 +142,15 @@
+ 
+ 				memset(o, 0, 8);
+ 				if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_422)
+-					memcpy(o, "422P", sizeof(o));
++					strscpy(o, "422P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_420)
+-					memcpy(o, "420P", sizeof(o));
++					strscpy(o, "420P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_444)
+-					memcpy(o, "444P", sizeof(o));
++					strscpy(o, "444P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_NV12)
+-					memcpy(o, "NV12", sizeof(o));
++					strscpy(o, "NV12", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_NV21)
+-					memcpy(o, "NV21", sizeof(o));
++					strscpy(o, "NV21", sizeof(o));
+ 
+ 				seq_printf(m, "\t%3d\t%3d\t%4d\t%4d\t%3s\t%2s\t%4d\t\t%4d\t\t%3s\t%6s\t\t%4d\n", i, j,
+ 					pviProcCtx->chnAttr[chn].stSize.u32Width,
+@@ -177,9 +177,9 @@
+ 					break;
+ 				memset(o, 0, 8);
+ 				if (pviProcCtx->chnAttr[chn].enCompressMode == COMPRESS_MODE_NONE)
+-					memcpy(o, "None", sizeof(o));
++					strscpy(o, "None", sizeof(o));
+ 				else
+-					memcpy(o, "Y", sizeof(o));
++					strscpy(o, "Y", sizeof(o));
+ 
+ 				seq_printf(m, "\t%3d\t%3d\t%4s\t\t%3d\t%3d\n", i, j,
+ 					o, pviProcCtx->chnAttr[chn].u32Depth, 32);
+@@ -201,21 +201,21 @@
+ 
+ 				memset(o, 0, 8);
+ 				if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_422)
+-					memcpy(o, "422P", sizeof(o));
++					strscpy(o, "422P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_420)
+-					memcpy(o, "420P", sizeof(o));
++					strscpy(o, "420P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_YUV_PLANAR_444)
+-					memcpy(o, "444P", sizeof(o));
++					strscpy(o, "444P", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_NV12)
+-					memcpy(o, "NV12", sizeof(o));
++					strscpy(o, "NV12", sizeof(o));
+ 				else if (pviProcCtx->chnAttr[chn].enPixelFormat == PIXEL_FORMAT_NV21)
+-					memcpy(o, "NV21", sizeof(o));
++					strscpy(o, "NV21", sizeof(o));
+ 
+ 				memset(p, 0, 8);
+ 				if (pviProcCtx->chnAttr[chn].enCompressMode == COMPRESS_MODE_NONE)
+-					memcpy(p, "None", sizeof(p));
++					strscpy(p, "None", sizeof(p));
+ 				else
+-					memcpy(p, "Y", sizeof(p));
++					strscpy(p, "Y", sizeof(p));
+ 
+ 				seq_printf(m, "\t%3d\t%3d\t%3s\t%2s\t%4d\t%4d\t%3s\t%6s\t\t%6s\t\t%5d\n", i, j,
+ 					(pviProcCtx->chnAttr[chn].bMirror) ? "Y" : "N",
+@@ -243,15 +243,15 @@
+ 
+ 				memset(o, 0, 8);
+ 				if (pviProcCtx->enRotation[chn] == ROTATION_0)
+-					memcpy(o, "0", sizeof(o));
++					strscpy(o, "0", sizeof(o));
+ 				else if (pviProcCtx->enRotation[chn] == ROTATION_90)
+-					memcpy(o, "90", sizeof(o));
++					strscpy(o, "90", sizeof(o));
+ 				else if (pviProcCtx->enRotation[chn] == ROTATION_180)
+-					memcpy(o, "180", sizeof(o));
++					strscpy(o, "180", sizeof(o));
+ 				else if (pviProcCtx->enRotation[chn] == ROTATION_270)
+-					memcpy(o, "270", sizeof(o));
++					strscpy(o, "270", sizeof(o));
+ 				else
+-					memcpy(o, "Invalid", sizeof(o));
++					strscpy(o, "Invalid", sizeof(o));
+ 
+ 				seq_printf(m, "\t%3d\t%3d\t%3s\n", i, j, o);
+ 			}
+@@ -291,9 +291,9 @@
+ 
+ 				memset(o, 0, 8);
+ 				if (pviProcCtx->chnCrop[chn].enCropCoordinate == VI_CROP_RATIO_COOR)
+-					memcpy(o, "RAT", sizeof(o));
++					strscpy(o, "RAT", sizeof(o));
+ 				else
+-					memcpy(o, "ABS", sizeof(o));
++					strscpy(o, "ABS", sizeof(o));
+ 
+ 				seq_printf(m, "\t%3d\t%3d\t%3s\t%5s\t\t%4d\t%4d\t%4d\t%4d\t%4d\t%3d\t%3d\t%4d\n", i, j,
+ 					pviProcCtx->chnCrop[chn].bEnable ? "Y" : "N", o,
+@@ -339,7 +339,7 @@
+ 
+ static int _vi_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, _vi_proc_show, PDE_DATA(inode));
++	return single_open(file, _vi_proc_show, pde_data(inode));
+ }
+ #if (KERNEL_VERSION(5, 10, 0) <= LINUX_VERSION_CODE)
+ static const struct proc_ops _vi_proc_fops = {
+diff -ruN a/vi/chip/cv181x/vi.c b/vi/chip/cv181x/vi.c
+--- a/vi/chip/cv181x/vi.c
++++ b/vi/chip/cv181x/vi.c
+@@ -1,6 +1,6 @@
+ #include <vi.h>
+ #include <linux/cvi_base_ctx.h>
+-#include <linux/of_gpio.h>
++#include <linux/gpio.h>	/* 7.2 port: of_gpio.h is gone; legacy numeric API */
+ #include <proc/vi_dbg_proc.h>
+ #include <proc/vi_proc.h>
+ #include <proc/vi_isp_proc.h>
+@@ -81,7 +81,7 @@
+ #if (KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE)
+ static void legacy_timer_emu_func(struct timer_list *t)
+ {
+-	struct legacy_timer_emu *lt = from_timer(lt, t, t);
++	struct legacy_timer_emu *lt = timer_container_of(lt, t, t);	/* 7.2: from_timer renamed */
+ 
+ 	lt->function(lt->data);
+ }
+@@ -2248,11 +2248,11 @@
+ {
+ #if (KERNEL_VERSION(4, 15, 0) <= LINUX_VERSION_CODE)
+ 	if (timer_pending(&usr_pic_timer.t)) {
+-		del_timer_sync(&usr_pic_timer.t);
++		timer_delete_sync(&usr_pic_timer.t);
+ 		timer_setup(&usr_pic_timer.t, legacy_timer_emu_func, 0);
+ #else
+ 	if (timer_pending(&usr_pic_timer)) {
+-		del_timer_sync(&usr_pic_timer);
++		timer_delete_sync(&usr_pic_timer);
+ 		init_timer(&usr_pic_timer);
+ #endif
+ 	}
+@@ -4676,7 +4676,6 @@
+ 
+ int vi_create_thread(struct cvi_vi_dev *vdev, enum E_VI_TH th_id)
+ {
+-	struct sched_param param;
+ 	int rc = 0;
+ 
+ 	if (th_id < 0 || th_id >= E_VI_TH_MAX) {
+@@ -4684,28 +4683,27 @@
+ 		return -1;
+ 	}
+ 
+-	param.sched_priority = MAX_USER_RT_PRIO - 10;
+ 
+ 	if (vdev->vi_th[th_id].w_thread == NULL) {
+ 		switch (th_id) {
+ 		case E_VI_TH_PRERAW:
+-			memcpy(vdev->vi_th[th_id].th_name, "cvitask_isp_pre", sizeof(vdev->vi_th[th_id].th_name));
++			strscpy(vdev->vi_th[th_id].th_name, "cvitask_isp_pre", sizeof(vdev->vi_th[th_id].th_name));
+ 			vdev->vi_th[th_id].th_handler = _vi_preraw_thread;
+ 			break;
+ 		case E_VI_TH_VBLANK_HANDLER:
+-			memcpy(vdev->vi_th[th_id].th_name, "cvitask_isp_blank", sizeof(vdev->vi_th[th_id].th_name));
++			strscpy(vdev->vi_th[th_id].th_name, "cvitask_isp_blank", sizeof(vdev->vi_th[th_id].th_name));
+ 			vdev->vi_th[th_id].th_handler = _vi_vblank_handler_thread;
+ 			break;
+ 		case E_VI_TH_ERR_HANDLER:
+-			memcpy(vdev->vi_th[th_id].th_name, "cvitask_isp_err", sizeof(vdev->vi_th[th_id].th_name));
++			strscpy(vdev->vi_th[th_id].th_name, "cvitask_isp_err", sizeof(vdev->vi_th[th_id].th_name));
+ 			vdev->vi_th[th_id].th_handler = _vi_err_handler_thread;
+ 			break;
+ 		case E_VI_TH_EVENT_HANDLER:
+-			memcpy(vdev->vi_th[th_id].th_name, "vi_event_handler", sizeof(vdev->vi_th[th_id].th_name));
++			strscpy(vdev->vi_th[th_id].th_name, "vi_event_handler", sizeof(vdev->vi_th[th_id].th_name));
+ 			vdev->vi_th[th_id].th_handler = _vi_event_handler_thread;
+ 			break;
+ 		case E_VI_TH_RUN_TPU:
+-			memcpy(vdev->vi_th[th_id].th_name, "vi_tpu_handler", sizeof(vdev->vi_th[th_id].th_name));
++			strscpy(vdev->vi_th[th_id].th_name, "vi_tpu_handler", sizeof(vdev->vi_th[th_id].th_name));
+ 			vdev->vi_th[th_id].th_handler = _vi_run_tpu_thread;
+ 			break;
+ 		default:
+@@ -4720,7 +4718,13 @@
+ 			return -1;
+ 		}
+ 
+-		sched_setscheduler(vdev->vi_th[th_id].w_thread, SCHED_FIFO, &param);
++		/*
++		 * 7.2 port: sched_setscheduler() is not exported to modules (5.9+);
++		 * sched_set_fifo() gives SCHED_FIFO at MAX_RT_PRIO / 2 = 50 (vendor:
++		 * MAX_USER_RT_PRIO - 10 = 90). First place to look if the ISP
++		 * threads miss frames under load.
++		 */
++		sched_set_fifo(vdev->vi_th[th_id].w_thread);
+ 
+ 		vdev->vi_th[th_id].flag = 0;
+ 		atomic_set(&vdev->vi_th[th_id].thread_exit, 0);
+@@ -5172,7 +5176,9 @@
+ 			}
+ 
+ 			if (cfg.param_size == sizeof(ai_isp_bnr_cfg_t)) {
+-				copy_from_user(&bnr_cfg, (void *)(uintptr_t)cfg.param_addr, cfg.param_size);
++				/* 7.2 port: the copy result was ignored */
++				if (copy_from_user(&bnr_cfg, (void __user *)(uintptr_t)cfg.param_addr, cfg.param_size))
++					return -EFAULT;
+ 				ctx->isp_pipe_cfg[raw_num].is_rgbmap_ai_isp = bnr_cfg.ai_rgbmap;
+ 				vi_pr(VI_INFO, "is ai isp rgbmap %d\n", ctx->isp_pipe_cfg[raw_num].is_rgbmap_ai_isp);
+ 			} else {
+@@ -7211,7 +7217,9 @@
+ 	enum E_VI_TH th_id = E_VI_TH_ERR_HANDLER;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		/* 7.2 port: TASK_IDLE, an idle wait is not load (the vendor's
++		 * plain wait_event put the load average at 3 with no work) */
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 
+ 		if (vdev->vi_th[th_id].flag == 1)
+ 			err_raw_num = ISP_PRERAW_A;
+@@ -7542,7 +7550,9 @@
+ 	enum E_VI_TH th_id = E_VI_TH_PRERAW;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		/* 7.2 port: TASK_IDLE, an idle wait is not load (the vendor's
++		 * plain wait_event put the load average at 3 with no work) */
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 		vdev->vi_th[th_id].flag = 0;
+ 
+ 		if (kthread_should_stop()) {
+@@ -7639,7 +7649,9 @@
+ 	raw_num = (vdev->vi_th[th_id].flag = 1) ? ISP_PRERAW_A : ISP_PRERAW_B;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
++		/* 7.2 port: TASK_IDLE, an idle wait is not load (the vendor's
++		 * plain wait_event put the load average at 3 with no work) */
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0 || kthread_should_stop());
+ 		vdev->vi_th[th_id].flag = 0;
+ 
+ 		if (kthread_should_stop()) {
+@@ -7763,8 +7775,8 @@
+ 	enum E_VI_TH th_id = E_VI_TH_RUN_TPU;
+ 
+ 	while (1) {
+-		wait_event(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0
+-			|| kthread_should_stop());
++		wait_event_idle(vdev->vi_th[th_id].wq, vdev->vi_th[th_id].flag != 0
++			|| kthread_should_stop()); /* 7.2 port: TASK_IDLE, as above */
+ 
+ 		if (vdev->vi_th[th_id].flag != 0) {
+ 			raw_num = vdev->vi_th[th_id].flag - 1;
+diff -ruN a/vi/chip/cv181x/vi.h b/vi/chip/cv181x/vi.h
+--- a/vi/chip/cv181x/vi.h
++++ b/vi/chip/cv181x/vi.h
+@@ -13,7 +13,7 @@
+ #include <linux/poll.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #if (KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE)
+ #include <uapi/linux/sched/types.h>
+diff -ruN a/vi/chip/cv181x/vi_isp_buf_ctrl.h b/vi/chip/cv181x/vi_isp_buf_ctrl.h
+--- a/vi/chip/cv181x/vi_isp_buf_ctrl.h
++++ b/vi/chip/cv181x/vi_isp_buf_ctrl.h
+@@ -13,7 +13,7 @@
+ #include <linux/poll.h>
+ #include <linux/sched/signal.h>
+ #include <linux/slab.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #include <uapi/linux/sched/types.h>
+ #include <linux/vi_tun_cfg.h>
+diff -ruN a/vi/common/vi_common.h b/vi/common/vi_common.h
+--- a/vi/common/vi_common.h
++++ b/vi/common/vi_common.h
+@@ -30,8 +30,13 @@
+ 	}
+ #endif
+ 
++/* 7.2 port: <linux/minmax.h> already defines MIN/MAX */
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b))?(a):(b))
++#endif
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b))?(a):(b))
++#endif
+ #define VI_64_ALIGN(x) (((x) + 0x3F) & ~0x3F)   // for 64byte alignment
+ #define VI_256_ALIGN(x) (((x) + 0xFF) & ~0xFF)   // for 256byte alignment
+ #define VI_ALIGN(x) (((x) + 0xF) & ~0xF)   // for 16byte alignment
+diff -ruN a/vi/common/vi_core.c b/vi/common/vi_core.c
+--- a/vi/common/vi_core.c
++++ b/vi/common/vi_core.c
+@@ -101,7 +101,7 @@
+ 	struct device *dev_t;
+ 	int err = 0;
+ 
+-	dev->vi_class = class_create(THIS_MODULE, CVI_VI_CLASS_NAME);
++	dev->vi_class = class_create(CVI_VI_CLASS_NAME)	/* 7.2: no owner */;
+ 	if (IS_ERR(dev->vi_class)) {
+ 		dev_err(dev->dev, "create class failed\n");
+ 		return PTR_ERR(dev->vi_class);
+@@ -253,7 +253,7 @@
+ 	return ret;
+ }
+ 
+-static int vi_core_remove(struct platform_device *pdev)
++static void vi_core_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	int ret = 0;
+ 
+@@ -279,8 +279,6 @@
+ 
+ err_destroy_instance:
+ 	vi_pr(VI_INFO, "%s -\n", __func__);
+-
+-	return ret;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff -ruN a/vi/common/vi_core.h b/vi/common/vi_core.h
+--- a/vi/common/vi_core.h
++++ b/vi/common/vi_core.h
+@@ -20,7 +20,7 @@
+ #include <linux/pm_qos.h>
+ #include <linux/slab.h>
+ #include <linux/spinlock.h>
+-#include <linux/streamline_annotate.h>
++/* 7.2 port: <linux/streamline_annotate.h> (ARM Streamline, vendor kernel only) unused */
+ #include <linux/version.h>
+ #if (KERNEL_VERSION(4, 11, 0) <= LINUX_VERSION_CODE)
+ #include <uapi/linux/sched/types.h>
+diff -ruN a/vpss/chip/cv181x/vpss_core.c b/vpss/chip/cv181x/vpss_core.c
+--- a/vpss/chip/cv181x/vpss_core.c
++++ b/vpss/chip/cv181x/vpss_core.c
+@@ -1702,15 +1702,10 @@
+  * bmd_remove - device remove method.
+  * @pdev: Pointer of platform device.
+  */
+-static int cvi_vpss_remove(struct platform_device *pdev)
++static void cvi_vpss_remove(struct platform_device *pdev)	/* 7.2: void */
+ {
+ 	struct cvi_vip_dev *dev;
+ 
+-	if (!pdev) {
+-		dev_err(&pdev->dev, "invalid param");
+-		return -EINVAL;
+-	}
+-
+ 	/* scaler rm cb */
+ 	if (vpss_core_rm_cb()) {
+ 		dev_err(&pdev->dev, "Failed to rm vpss cb\n");
+@@ -1719,7 +1714,7 @@
+ 	dev = dev_get_drvdata(&pdev->dev);
+ 	if (!dev) {
+ 		dev_err(&pdev->dev, "Can not get cvi_vpss drvdata");
+-		return -EINVAL;
++		return;
+ 	}
+ 
+ #if defined(CONFIG_SCLR_TEST)
+@@ -1732,8 +1727,6 @@
+ 
+ 	misc_deregister(&dev->miscdev);
+ 	dev_set_drvdata(&pdev->dev, NULL);
+-
+-	return 0;
+ }
+ 
+ #ifdef CONFIG_PM_SLEEP
+diff -ruN a/vpss/common/cvi_vip_vpss_proc.c b/vpss/common/cvi_vip_vpss_proc.c
+--- a/vpss/common/cvi_vip_vpss_proc.c
++++ b/vpss/common/cvi_vip_vpss_proc.c
+@@ -1,4 +1,6 @@
+ #include <linux/slab.h>
++#include <linux/string.h>
++#include <generated/utsversion.h>	/* 7.2: UTS_VERSION */
+ #include <linux/proc_fs.h>
+ #include <linux/uaccess.h>
+ 
+@@ -30,133 +32,133 @@
+ {
+ 	switch (PixFmt) {
+ 	case PIXEL_FORMAT_RGB_888:
+-		strncpy(str, "RGB_888", len);
++		strscpy(str, "RGB_888", len);
+ 		break;
+ 	case PIXEL_FORMAT_BGR_888:
+-		strncpy(str, "BGR_888", len);
++		strscpy(str, "BGR_888", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_888_PLANAR:
+-		strncpy(str, "RGB_888_PLANAR", len);
++		strscpy(str, "RGB_888_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_BGR_888_PLANAR:
+-		strncpy(str, "BGR_888_PLANAR", len);
++		strscpy(str, "BGR_888_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_ARGB_1555:
+-		strncpy(str, "ARGB_1555", len);
++		strscpy(str, "ARGB_1555", len);
+ 		break;
+ 	case PIXEL_FORMAT_ARGB_4444:
+-		strncpy(str, "ARGB_4444", len);
++		strscpy(str, "ARGB_4444", len);
+ 		break;
+ 	case PIXEL_FORMAT_ARGB_8888:
+-		strncpy(str, "ARGB_8888", len);
++		strscpy(str, "ARGB_8888", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_BAYER_8BPP:
+-		strncpy(str, "RGB_BAYER_8BPP", len);
++		strscpy(str, "RGB_BAYER_8BPP", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_BAYER_10BPP:
+-		strncpy(str, "RGB_BAYER_10BPP", len);
++		strscpy(str, "RGB_BAYER_10BPP", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_BAYER_12BPP:
+-		strncpy(str, "RGB_BAYER_12BPP", len);
++		strscpy(str, "RGB_BAYER_12BPP", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_BAYER_14BPP:
+-		strncpy(str, "RGB_BAYER_14BPP", len);
++		strscpy(str, "RGB_BAYER_14BPP", len);
+ 		break;
+ 	case PIXEL_FORMAT_RGB_BAYER_16BPP:
+-		strncpy(str, "RGB_BAYER_16BPP", len);
++		strscpy(str, "RGB_BAYER_16BPP", len);
+ 		break;
+ 	case PIXEL_FORMAT_YUV_PLANAR_422:
+-		strncpy(str, "YUV_PLANAR_422", len);
++		strscpy(str, "YUV_PLANAR_422", len);
+ 		break;
+ 	case PIXEL_FORMAT_YUV_PLANAR_420:
+-		strncpy(str, "YUV_PLANAR_420", len);
++		strscpy(str, "YUV_PLANAR_420", len);
+ 		break;
+ 	case PIXEL_FORMAT_YUV_PLANAR_444:
+-		strncpy(str, "YUV_PLANAR_444", len);
++		strscpy(str, "YUV_PLANAR_444", len);
+ 		break;
+ 	case PIXEL_FORMAT_YUV_400:
+-		strncpy(str, "YUV_400", len);
++		strscpy(str, "YUV_400", len);
+ 		break;
+ 	case PIXEL_FORMAT_HSV_888:
+-		strncpy(str, "HSV_888", len);
++		strscpy(str, "HSV_888", len);
+ 		break;
+ 	case PIXEL_FORMAT_HSV_888_PLANAR:
+-		strncpy(str, "HSV_888_PLANAR", len);
++		strscpy(str, "HSV_888_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_NV12:
+-		strncpy(str, "NV12", len);
++		strscpy(str, "NV12", len);
+ 		break;
+ 	case PIXEL_FORMAT_NV21:
+-		strncpy(str, "NV21", len);
++		strscpy(str, "NV21", len);
+ 		break;
+ 	case PIXEL_FORMAT_NV16:
+-		strncpy(str, "NV16", len);
++		strscpy(str, "NV16", len);
+ 		break;
+ 	case PIXEL_FORMAT_NV61:
+-		strncpy(str, "NV61", len);
++		strscpy(str, "NV61", len);
+ 		break;
+ 	case PIXEL_FORMAT_YUYV:
+-		strncpy(str, "YUYV", len);
++		strscpy(str, "YUYV", len);
+ 		break;
+ 	case PIXEL_FORMAT_UYVY:
+-		strncpy(str, "UYVY", len);
++		strscpy(str, "UYVY", len);
+ 		break;
+ 	case PIXEL_FORMAT_YVYU:
+-		strncpy(str, "YVYU", len);
++		strscpy(str, "YVYU", len);
+ 		break;
+ 	case PIXEL_FORMAT_VYUY:
+-		strncpy(str, "VYUY", len);
++		strscpy(str, "VYUY", len);
+ 		break;
+ 	case PIXEL_FORMAT_FP32_C1:
+-		strncpy(str, "FP32_C1", len);
++		strscpy(str, "FP32_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_FP32_C3_PLANAR:
+-		strncpy(str, "FP32_C3_PLANAR", len);
++		strscpy(str, "FP32_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT32_C1:
+-		strncpy(str, "INT32_C1", len);
++		strscpy(str, "INT32_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT32_C3_PLANAR:
+-		strncpy(str, "INT32_C3_PLANAR", len);
++		strscpy(str, "INT32_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT32_C1:
+-		strncpy(str, "UINT32_C1", len);
++		strscpy(str, "UINT32_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT32_C3_PLANAR:
+-		strncpy(str, "UINT32_C3_PLANAR", len);
++		strscpy(str, "UINT32_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_BF16_C1:
+-		strncpy(str, "BF16_C1", len);
++		strscpy(str, "BF16_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_BF16_C3_PLANAR:
+-		strncpy(str, "BF16_C3_PLANAR", len);
++		strscpy(str, "BF16_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT16_C1:
+-		strncpy(str, "INT16_C1", len);
++		strscpy(str, "INT16_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT16_C3_PLANAR:
+-		strncpy(str, "INT16_C3_PLANAR", len);
++		strscpy(str, "INT16_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT16_C1:
+-		strncpy(str, "UINT16_C1", len);
++		strscpy(str, "UINT16_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT16_C3_PLANAR:
+-		strncpy(str, "UINT16_C3_PLANAR", len);
++		strscpy(str, "UINT16_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT8_C1:
+-		strncpy(str, "INT8_C1", len);
++		strscpy(str, "INT8_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_INT8_C3_PLANAR:
+-		strncpy(str, "INT8_C3_PLANAR", len);
++		strscpy(str, "INT8_C3_PLANAR", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT8_C1:
+-		strncpy(str, "UINT8_C1", len);
++		strscpy(str, "UINT8_C1", len);
+ 		break;
+ 	case PIXEL_FORMAT_UINT8_C3_PLANAR:
+-		strncpy(str, "UINT8_C3_PLANAR", len);
++		strscpy(str, "UINT8_C3_PLANAR", len);
+ 		break;
+ 	default:
+-		strncpy(str, "Unknown Fmt", len);
++		strscpy(str, "Unknown Fmt", len);
+ 		break;
+ 	}
+ }
+@@ -216,14 +218,14 @@
+ 
+ 				memset(c, 0, sizeof(c));
+ 				if (pVpssCtx[i]->stChnCfgs[j].stChnAttr.stAspectRatio.enMode == ASPECT_RATIO_NONE)
+-					strncpy(c, "NONE", sizeof(c));
++					strscpy(c, "NONE", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].stChnAttr.stAspectRatio.enMode == ASPECT_RATIO_AUTO)
+-					strncpy(c, "AUTO", sizeof(c));
++					strscpy(c, "AUTO", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].stChnAttr.stAspectRatio.enMode
+ 						== ASPECT_RATIO_MANUAL)
+-					strncpy(c, "MANUAL", sizeof(c));
++					strscpy(c, "MANUAL", sizeof(c));
+ 				else
+-					strncpy(c, "Invalid", sizeof(c));
++					strscpy(c, "Invalid", sizeof(c));
+ 
+ 				if (pVpssCtx[i]->stChnCfgs[j].stChnAttr.stAspectRatio.enMode == ASPECT_RATIO_MANUAL) {
+ 					X = pVpssCtx[i]->stChnCfgs[j].stChnAttr.stAspectRatio.stVideoRect.s32X;
+@@ -356,17 +358,17 @@
+ 			for (j = 0; j < pVpssCtx[i]->chnNum; ++j) {
+ 				memset(c, 0, sizeof(c));
+ 				if (pVpssCtx[i]->stChnCfgs[j].enRotation == ROTATION_0)
+-					strncpy(c, "0", sizeof(c));
++					strscpy(c, "0", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].enRotation == ROTATION_90)
+-					strncpy(c, "90", sizeof(c));
++					strscpy(c, "90", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].enRotation == ROTATION_180)
+-					strncpy(c, "180", sizeof(c));
++					strscpy(c, "180", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].enRotation == ROTATION_270)
+-					strncpy(c, "270", sizeof(c));
++					strscpy(c, "270", sizeof(c));
+ 				else if (pVpssCtx[i]->stChnCfgs[j].enRotation == ROTATION_XY_FLIP)
+-					strncpy(c, "xy_flip", sizeof(c));
++					strscpy(c, "xy_flip", sizeof(c));
+ 				else
+-					strncpy(c, "Invalid", sizeof(c));
++					strscpy(c, "Invalid", sizeof(c));
+ 
+ 				seq_printf(m, "%8s%2d%8s%2d%10s\n", "#", i, "#", j, c);
+ 			}
+@@ -528,7 +530,7 @@
+ 
+ static int vpss_proc_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, vpss_proc_show, PDE_DATA(inode));
++	return single_open(file, vpss_proc_show, pde_data(inode));
+ }
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0))
+diff -ruN a/vpss/common/vpss.c b/vpss/common/vpss.c
+--- a/vpss/common/vpss.c
++++ b/vpss/common/vpss.c
+@@ -5108,14 +5108,9 @@
+ 
+ static void vpss_start_handler(void)
+ {
+-	int ret;
+ 	u8 u8VpssDev;
+-	struct sched_param tsk;
+ 	char thread_name[32];
+ 
+-	// Same as sched_set_fifo in linux 5.x
+-	tsk.sched_priority = MAX_USER_RT_PRIO - 10;
+-
+ 	for (u8VpssDev = 0; u8VpssDev < VPSS_IP_NUM; u8VpssDev++) {
+ 		handler_ctx[u8VpssDev].u8VpssDev = u8VpssDev;
+ 		handler_ctx[u8VpssDev].img_idx = u8VpssDev;
+@@ -5137,9 +5132,10 @@
+ 			pr_err("failed to create vpss kthread, u8VpssDev=%d\n", u8VpssDev);
+ 		}
+ 
+-		ret = sched_setscheduler(handler_ctx[u8VpssDev].thread, SCHED_FIFO, &tsk);
+-		if (ret)
+-			pr_warn("vpss thread priority update failed: %d\n", ret);
++		/* 7.2 port: sched_setscheduler() is not exported (5.9+); the vendor
++		 * comment already said "same as sched_set_fifo". FIFO 50, not 90. */
++		if (!IS_ERR(handler_ctx[u8VpssDev].thread))
++			sched_set_fifo(handler_ctx[u8VpssDev].thread);
+ 		CVI_TRACE_VPSS(CVI_DBG_WARN, "handler for dev(%d) started", u8VpssDev);
+ 	}
+ }
+diff -ruN a/vpss/common/vpss_common.h b/vpss/common/vpss_common.h
+--- a/vpss/common/vpss_common.h
++++ b/vpss/common/vpss_common.h
+@@ -4,8 +4,13 @@
+ #define VIP_ALIGNMENT 0x40
+ #define GOP_ALIGNMENT 0x10
+ 
++/* 7.2 port: <linux/minmax.h> already defines MIN/MAX */
++#ifndef MIN
+ #define MIN(a, b) (((a) < (b))?(a):(b))
++#endif
++#ifndef MAX
+ #define MAX(a, b) (((a) > (b))?(a):(b))
++#endif
+ #define UPPER(x, y) (((x) + ((1 << (y)) - 1)) >> (y))   // for alignment
+ 
+ #define VIP_64_ALIGN(x) (((x) + 0x3F) & ~0x3F)   // for 64byte alignment

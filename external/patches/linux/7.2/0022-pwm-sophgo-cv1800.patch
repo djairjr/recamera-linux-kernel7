@@ -1,0 +1,200 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] pwm: add the Sophgo CV18xx/SG2002 PWM controller
+
+Mainline has no driver for this controller (pwm-sophgo-sg2042 is another
+IP). Written for the 7.2 PWM API (apply/get_state, devm_pwmchip_alloc) from
+the register layout of the Sophgo 5.10 osdrv cvi_pwm.c; the vendor driver
+itself used out-of-tree pwm_ops extensions (capture, shift mode). On the
+reCamera it drives the white LED (pad PWR_GPIO0, function 4 = PWM_8,
+controller 2 channel 0) through leds-pwm. F7, docs/multimedia.md.
+
+diff --color -ruN a/drivers/pwm/Kconfig b/drivers/pwm/Kconfig
+--- a/drivers/pwm/Kconfig
++++ b/drivers/pwm/Kconfig
+@@ -223,6 +223,17 @@
+ 	  Generic PWM framework driver for Crystalcove (CRC) PMIC based PWM
+ 	  control.
+ 
++config PWM_CV1800
++	tristate "Sophgo CV18xx/SG2002 PWM support"
++	depends on ARCH_SOPHGO || COMPILE_TEST
++	depends on COMMON_CLK && HAS_IOMEM
++	help
++	  PWM controller of the Sophgo CV18xx/SG2002 SoCs (four controllers
++	  of four channels).
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called pwm-cv1800.
++
+ config PWM_CROS_EC
+ 	tristate "ChromeOS EC PWM driver"
+ 	depends on CROS_EC
+diff --color -ruN a/drivers/pwm/Makefile b/drivers/pwm/Makefile
+--- a/drivers/pwm/Makefile
++++ b/drivers/pwm/Makefile
+@@ -18,6 +18,7 @@
+ obj-$(CONFIG_PWM_CLPS711X)	+= pwm-clps711x.o
+ obj-$(CONFIG_PWM_CRC)		+= pwm-crc.o
+ obj-$(CONFIG_PWM_CROS_EC)	+= pwm-cros-ec.o
++obj-$(CONFIG_PWM_CV1800)	+= pwm-cv1800.o
+ obj-$(CONFIG_PWM_DWC_CORE)	+= pwm-dwc-core.o
+ obj-$(CONFIG_PWM_DWC)		+= pwm-dwc.o
+ obj-$(CONFIG_PWM_EP93XX)	+= pwm-ep93xx.o
+diff --color -ruN a/drivers/pwm/pwm-cv1800.c b/drivers/pwm/pwm-cv1800.c
+--- a/drivers/pwm/pwm-cv1800.c
++++ b/drivers/pwm/pwm-cv1800.c
+@@ -0,0 +1,154 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Sophgo CV18xx / SG2002 PWM controller.
++ *
++ * Four controllers at 0x3060000 + n * 0x1000, four channels each (PWM_0..15
++ * in the pin tables). Register layout from the Sophgo 5.10 osdrv cvi_pwm.c:
++ * per channel n at 8 * n, HLPERIOD (low-level time) and PERIOD, both in
++ * cycles of the PWM clock; a channel runs when its bit is set in PWMSTART and
++ * drives the pad when set in PWM_OE; new values are latched by a pulse on its
++ * PWMUPDATE bit. POLARITY bit n inverts the output.
++ *
++ * The counters need 1 <= low time <= period - 1: 0 % and 100 % duty are
++ * produced by stopping the channel with the pad held by the polarity bit.
++ */
++#include <linux/bitops.h>
++#include <linux/clk.h>
++#include <linux/err.h>
++#include <linux/io.h>
++#include <linux/math64.h>
++#include <linux/module.h>
++#include <linux/platform_device.h>
++#include <linux/pwm.h>
++
++#define CV1800_PWM_HLPERIOD(n)	(0x8 * (n) + 0x0)
++#define CV1800_PWM_PERIOD(n)	(0x8 * (n) + 0x4)
++#define CV1800_PWM_POLARITY	0x40
++#define CV1800_PWM_START	0x44
++#define CV1800_PWM_UPDATE	0x4c
++#define CV1800_PWM_OE		0xd0
++
++#define CV1800_PWM_CHANNELS	4
++#define CV1800_PWM_MAX_COUNT	U32_MAX
++
++struct cv1800_pwm {
++	void __iomem *base;
++	unsigned long rate;
++};
++
++static void cv1800_pwm_update_bit(struct cv1800_pwm *p, u32 reg, u32 bit, bool set)
++{
++	u32 v = readl(p->base + reg);
++
++	writel(set ? v | bit : v & ~bit, p->base + reg);
++}
++
++static int cv1800_pwm_apply(struct pwm_chip *chip, struct pwm_device *pwm,
++			    const struct pwm_state *state)
++{
++	struct cv1800_pwm *p = pwmchip_get_drvdata(chip);
++	u32 bit = BIT(pwm->hwpwm);
++	u64 period, duty;
++	bool inverted = state->polarity == PWM_POLARITY_INVERSED;
++
++	period = mul_u64_u64_div_u64(state->period, p->rate, NSEC_PER_SEC);
++	duty = mul_u64_u64_div_u64(state->duty_cycle, p->rate, NSEC_PER_SEC);
++	if (period > CV1800_PWM_MAX_COUNT)
++		period = CV1800_PWM_MAX_COUNT;
++	if (duty > period)
++		duty = period;
++
++	/* stop the channel; a stopped channel holds the idle level */
++	cv1800_pwm_update_bit(p, CV1800_PWM_START, bit, false);
++
++	if (!state->enabled || period < 2 || duty == 0 || duty == period) {
++		/*
++		 * Off, 0 % or 100 %: pad driven at a constant level. The idle
++		 * level is low with normal polarity: for 100 % flip the
++		 * polarity so the stopped channel holds the pad high.
++		 */
++		bool high = state->enabled && period >= 2 && duty == period;
++
++		cv1800_pwm_update_bit(p, CV1800_PWM_POLARITY, bit, high != inverted);
++		cv1800_pwm_update_bit(p, CV1800_PWM_OE, bit, state->enabled);
++		return 0;
++	}
++
++	cv1800_pwm_update_bit(p, CV1800_PWM_POLARITY, bit, inverted);
++	writel(period, p->base + CV1800_PWM_PERIOD(pwm->hwpwm));
++	writel(period - duty, p->base + CV1800_PWM_HLPERIOD(pwm->hwpwm));
++	/* latch the new counts, then run and drive the pad */
++	cv1800_pwm_update_bit(p, CV1800_PWM_UPDATE, bit, true);
++	cv1800_pwm_update_bit(p, CV1800_PWM_UPDATE, bit, false);
++	cv1800_pwm_update_bit(p, CV1800_PWM_OE, bit, true);
++	cv1800_pwm_update_bit(p, CV1800_PWM_START, bit, true);
++	return 0;
++}
++
++static int cv1800_pwm_get_state(struct pwm_chip *chip, struct pwm_device *pwm,
++				struct pwm_state *state)
++{
++	struct cv1800_pwm *p = pwmchip_get_drvdata(chip);
++	u32 bit = BIT(pwm->hwpwm);
++	u64 period = readl(p->base + CV1800_PWM_PERIOD(pwm->hwpwm));
++	u64 low = readl(p->base + CV1800_PWM_HLPERIOD(pwm->hwpwm));
++
++	state->enabled = readl(p->base + CV1800_PWM_START) & bit;
++	state->polarity = readl(p->base + CV1800_PWM_POLARITY) & bit ?
++			  PWM_POLARITY_INVERSED : PWM_POLARITY_NORMAL;
++	state->period = DIV64_U64_ROUND_UP(period * NSEC_PER_SEC, p->rate);
++	state->duty_cycle = low <= period ?
++		DIV64_U64_ROUND_UP((period - low) * NSEC_PER_SEC, p->rate) : 0;
++	return 0;
++}
++
++static const struct pwm_ops cv1800_pwm_ops = {
++	.apply = cv1800_pwm_apply,
++	.get_state = cv1800_pwm_get_state,
++};
++
++static int cv1800_pwm_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct pwm_chip *chip;
++	struct cv1800_pwm *p;
++	struct clk *clk;
++
++	chip = devm_pwmchip_alloc(dev, CV1800_PWM_CHANNELS, sizeof(*p));
++	if (IS_ERR(chip))
++		return PTR_ERR(chip);
++	p = pwmchip_get_drvdata(chip);
++
++	/* the clock first: register accesses with it off hang the SoC */
++	clk = devm_clk_get_enabled(dev, NULL);
++	if (IS_ERR(clk))
++		return dev_err_probe(dev, PTR_ERR(clk), "no clock\n");
++	p->rate = clk_get_rate(clk);
++	if (!p->rate)
++		return dev_err_probe(dev, -EINVAL, "clock rate is 0\n");
++
++	p->base = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(p->base))
++		return PTR_ERR(p->base);
++
++	chip->ops = &cv1800_pwm_ops;
++	return devm_pwmchip_add(dev, chip);
++}
++
++static const struct of_device_id cv1800_pwm_match[] = {
++	{ .compatible = "sophgo,cv1800-pwm" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, cv1800_pwm_match);
++
++static struct platform_driver cv1800_pwm_driver = {
++	.driver = {
++		.name = "cv1800-pwm",
++		.of_match_table = cv1800_pwm_match,
++	},
++	.probe = cv1800_pwm_probe,
++};
++module_platform_driver(cv1800_pwm_driver);
++
++MODULE_DESCRIPTION("Sophgo CV18xx/SG2002 PWM driver");
++MODULE_LICENSE("GPL");

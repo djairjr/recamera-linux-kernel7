@@ -1,0 +1,28 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] usb: dwc2: cv1800: gadget buffer DMA, no descriptor DMA
+
+dwc2_set_cv1800_params() turns gadget DMA off (g_dma = false) but leaves
+the default g_dma_desc, which requires g_dma, so dwc2_check_params()
+warns "Invalid parameter g_dma_desc=1" at every probe.
+
+Use buffer DMA and keep descriptor DMA off. Measured on the reCamera
+(SG2002, NCM gadget, iperf3 against a Linux host):
+  slave mode (no DMA):          host->dev 122 Mbit/s, dev->host  94 Mbit/s
+  buffer DMA:                   host->dev 157 Mbit/s, dev->host 146 Mbit/s
+  buffer + descriptor DMA:      dev->host TCP stalls (ICMP still passes)
+Buffer DMA also moved 200 MB each way over ssh with matching md5 and no
+dwc2 errors.
+
+diff --color -ruN a/drivers/usb/dwc2/params.c b/drivers/usb/dwc2/params.c
+--- a/drivers/usb/dwc2/params.c	2026-10-18 16:35:53.180475731 -0300
++++ b/drivers/usb/dwc2/params.c	2026-10-18 16:35:53.196851915 -0300
+@@ -225,7 +225,8 @@
+ 	p->otg_caps.hnp_support = false;
+ 	p->otg_caps.srp_support = false;
+ 	p->host_dma = false;
+-	p->g_dma = false;
++	p->g_dma = true;
++	p->g_dma_desc = false;	/* descriptor DMA stalls dev->host NCM TCP */
+ 	p->speed = DWC2_SPEED_PARAM_HIGH;
+ 	p->phy_type = DWC2_PHY_TYPE_PARAM_UTMI;
+ 	p->phy_utmi_width = 16;

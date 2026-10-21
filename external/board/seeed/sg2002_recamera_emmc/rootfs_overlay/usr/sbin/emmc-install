@@ -1,0 +1,189 @@
+#!/bin/sh
+#
+# emmc-install -- install the system from this SD card into the eMMC.
+#
+# Layout (docs/emmc-layout.md), MBR, 512-byte sectors:
+#   0                MBR
+#   8 MiB  (128 KiB) U-Boot environment of the official fip (outside partitions)
+#   p1  16 MiB  256 MiB  FAT32 "BOOT"   boot-a.itb, boot-b.itb
+#   p2         8 GiB     ext4 "rootfs-a"
+#   p3         8 GiB     ext4 "rootfs-b"
+#   p4         rest      ext4 "data"    /data, kept across installs
+# plus the official fip.bin in the eMMC hardware partition boot0 (at 0 and at
+# 1 MiB, as the vendor's fip/fip_bak) and a copy in boot1.
+#
+# Runs only from the SD card system, only with --yes, and never by itself.
+# The source files are the SD card's partition 3 (INSTALL), checked against
+# its SHA256SUMS before anything is written; every write is read back.
+#
+# Usage: emmc-install --yes [--wipe-data] [--no-fip]
+
+set -u
+
+EMMC=/dev/mmcblk0
+SRC_DEV=/dev/mmcblk1p3
+SRC=/mnt/install
+LOG=/tmp/emmc-install.log
+
+P1_START=32768;    P1_SIZE=524288	# 16 MiB, 256 MiB
+P2_START=557056;   P2_SIZE=16777216	# 8 GiB
+P3_START=17334272; P3_SIZE=16777216	# 8 GiB
+P4_START=34111488			# up to the end
+ENV_OFFSET=$((8 * 1024 * 1024)); ENV_SIZE=$((128 * 1024))
+MIN_SECTORS=$((P4_START + 2097152))	# p4 of at least 1 GiB
+
+CONFIRM=0; WIPE_DATA=0; DO_FIP=1
+for a in "$@"; do
+	case "$a" in
+		--yes) CONFIRM=1 ;;
+		--wipe-data) WIPE_DATA=1 ;;
+		--no-fip) DO_FIP=0 ;;
+		*) echo "unknown option: $a"; exit 2 ;;
+	esac
+done
+
+say() { echo "[emmc-install] $*" | tee -a "$LOG"; }
+die() { say "ERROR: $*"; exit 1; }
+
+# sha256 of the first $3 bytes of device $1 at byte offset $2
+dev_sha() {
+	dd if="$1" bs=512 skip=$(($2 / 512)) count=$((($3 + 511) / 512)) 2>/dev/null |
+		head -c "$3" | sha256sum | cut -d' ' -f1
+}
+file_sha() { sha256sum "$1" | cut -d' ' -f1; }
+fsize() { wc -c < "$1" | tr -d " "; }
+
+: > "$LOG"
+
+# ---- 1. preconditions --------------------------------------------------------
+[ "$(id -u)" = 0 ] || die "must run as root"
+case " $(cat /proc/cmdline) " in
+	*" root=/dev/mmcblk1p2 "*) ;;
+	*) die "run it from the SD card system (root=/dev/mmcblk1p2); this system runs from elsewhere" ;;
+esac
+[ -b "$EMMC" ] || die "no $EMMC"
+grep -q "^$EMMC" /proc/mounts && die "eMMC partitions are mounted: $(grep "^$EMMC" /proc/mounts | cut -d' ' -f1-2 | tr '\n' ' ')"
+SECTORS=$(cat /sys/block/mmcblk0/size)
+[ "$SECTORS" -ge "$MIN_SECTORS" ] || die "eMMC too small ($SECTORS sectors)"
+for t in sfdisk mkfs.fat mkfs.ext4 e2fsck resize2fs blkid blockdev; do
+	command -v "$t" >/dev/null || die "missing tool: $t"
+done
+
+mkdir -p "$SRC"
+grep -q " $SRC " /proc/mounts || mount -o ro "$SRC_DEV" "$SRC" || die "cannot mount $SRC_DEV"
+for f in fip.bin boot.itb rootfs.ext4 uboot-env.bin SHA256SUMS; do
+	[ -f "$SRC/$f" ] || die "missing $SRC/$f"
+done
+say "checking the install files (SHA256SUMS)..."
+(cd "$SRC" && sha256sum -c SHA256SUMS) >> "$LOG" 2>&1 || die "SHA256SUMS mismatch"
+[ "$(fsize "$SRC/uboot-env.bin")" = "$ENV_SIZE" ] || die "uboot-env.bin is not $ENV_SIZE bytes"
+
+say "eMMC: $(cat /sys/block/mmcblk0/device/name) $SECTORS sectors ($((SECTORS / 2097152)) GiB)"
+say "source: $(cat "$SRC/VERSION" 2>/dev/null || echo '?')"
+
+DATA_KEEP=0
+if [ "$WIPE_DATA" = 0 ] && [ -b ${EMMC}p4 ] &&
+   [ "$(blkid -s TYPE -o value ${EMMC}p4 2>/dev/null)" = ext4 ] &&
+   [ "$(blkid -s LABEL -o value ${EMMC}p4 2>/dev/null)" = data ] &&
+   [ "$(cat /sys/block/mmcblk0/mmcblk0p4/start 2>/dev/null)" = "$P4_START" ]; then
+	DATA_KEEP=1
+fi
+
+if [ "$CONFIRM" != 1 ]; then
+	echo
+	echo "This ERASES the eMMC (boot, rootfs A and B, U-Boot environment$( [ $DO_FIP = 1 ] && echo ', fip in boot0'))."
+	[ $DATA_KEEP = 1 ] && echo "The existing DATA partition (p4) is KEPT." \
+		|| echo "The DATA partition (p4) is CREATED FROM SCRATCH."
+	echo "To go on: emmc-install --yes"
+	exit 0
+fi
+
+# ---- 2. fip into boot0 (0 and 1 MiB) and boot1 --------------------------------
+if [ "$DO_FIP" = 1 ]; then
+	FIP_SHA=$(file_sha "$SRC/fip.bin"); FIP_LEN=$(fsize "$SRC/fip.bin")
+	for b in mmcblk0boot0 mmcblk0boot1; do
+		echo 0 > /sys/block/$b/force_ro || die "force_ro $b"
+		for off in 0 1048576; do
+			[ $b = mmcblk0boot1 ] && [ $off != 0 ] && continue
+			dd if="$SRC/fip.bin" of=/dev/$b bs=512 seek=$((off / 512)) conv=fsync 2>>"$LOG" ||
+				{ echo 1 > /sys/block/$b/force_ro; die "writing the fip to $b"; }
+			echo 3 > /proc/sys/vm/drop_caches
+			[ "$(dev_sha /dev/$b $off $FIP_LEN)" = "$FIP_SHA" ] ||
+				{ echo 1 > /sys/block/$b/force_ro; die "fip at $b+$off mismatch"; }
+			say "fip written and checked at $b+$off"
+		done
+		echo 1 > /sys/block/$b/force_ro
+	done
+fi
+
+# ---- 3. partition table ------------------------------------------------------
+say "writing the MBR partition table..."
+if [ $DATA_KEEP = 1 ]; then
+	say "  (p4 DATA exists with the same start: kept)"
+fi
+sfdisk --no-reread --wipe never --wipe-partitions never "$EMMC" >> "$LOG" 2>&1 <<EOF || die "sfdisk"
+label: dos
+unit: sectors
+start=$P1_START, size=$P1_SIZE, type=c, bootable
+start=$P2_START, size=$P2_SIZE, type=83
+start=$P3_START, size=$P3_SIZE, type=83
+start=$P4_START, type=83
+EOF
+blockdev --rereadpt "$EMMC" 2>>"$LOG" || die "the kernel did not reread the table"
+i=0; while [ ! -b ${EMMC}p4 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+[ -b ${EMMC}p4 ] || die "the partitions did not show up"
+for n in 1 2 3 4; do say "  p$n start $(cat /sys/block/mmcblk0/mmcblk0p$n/start) sectors $(cat /sys/block/mmcblk0/mmcblk0p$n/size)"; done
+
+# ---- 4. U-Boot environment (after the MBR, outside every partition) ----------
+dd if="$SRC/uboot-env.bin" of="$EMMC" bs=512 seek=$((ENV_OFFSET / 512)) conv=fsync 2>>"$LOG" || die "writing the environment"
+echo 3 > /proc/sys/vm/drop_caches
+[ "$(dev_sha $EMMC $ENV_OFFSET $ENV_SIZE)" = "$(file_sha "$SRC/uboot-env.bin")" ] || die "environment mismatch"
+say "U-Boot environment written and checked (8 MiB, slot=a)"
+
+# ---- 5. p1 BOOT --------------------------------------------------------------
+mkfs.fat -F 32 -n BOOT ${EMMC}p1 >> "$LOG" 2>&1 || die "mkfs.fat p1"
+mkdir -p /mnt/emmc-boot
+mount -t vfat ${EMMC}p1 /mnt/emmc-boot || die "mount p1"
+for s in a b; do cp "$SRC/boot.itb" /mnt/emmc-boot/boot-$s.itb || die "copying boot-$s.itb"; done
+sync; umount /mnt/emmc-boot; echo 3 > /proc/sys/vm/drop_caches
+mount -o ro -t vfat ${EMMC}p1 /mnt/emmc-boot || die "remount p1"
+for s in a b; do
+	[ "$(file_sha /mnt/emmc-boot/boot-$s.itb)" = "$(file_sha "$SRC/boot.itb")" ] || die "boot-$s.itb mismatch"
+done
+umount /mnt/emmc-boot
+say "p1 BOOT: boot-a.itb and boot-b.itb checked"
+
+# ---- 6. p2 / p3 rootfs A and B -----------------------------------------------
+RFS_SHA=$(file_sha "$SRC/rootfs.ext4"); RFS_LEN=$(fsize "$SRC/rootfs.ext4")
+for n in 2 3; do
+	[ $n = 2 ] && L=rootfs-a || L=rootfs-b
+	command -v blkdiscard >/dev/null && blkdiscard ${EMMC}p$n 2>>"$LOG"
+	dd if="$SRC/rootfs.ext4" of=${EMMC}p$n bs=4M conv=fsync 2>>"$LOG" || die "writing p$n"
+	echo 3 > /proc/sys/vm/drop_caches
+	[ "$(dev_sha ${EMMC}p$n 0 $RFS_LEN)" = "$RFS_SHA" ] || die "p$n mismatch"
+	e2fsck -fy ${EMMC}p$n >> "$LOG" 2>&1; [ $? -le 1 ] || die "e2fsck p$n"
+	resize2fs ${EMMC}p$n >> "$LOG" 2>&1 || die "resize2fs p$n"
+	# label, and a filesystem UUID of its own (both slots come from the same image)
+	command -v tune2fs >/dev/null && tune2fs -L $L -U random ${EMMC}p$n >> "$LOG" 2>&1
+	say "p$n $L: written, checked and resized"
+done
+
+# ---- 7. p4 DATA --------------------------------------------------------------
+if [ $DATA_KEEP = 1 ]; then
+	e2fsck -p ${EMMC}p4 >> "$LOG" 2>&1
+	say "p4 DATA kept"
+else
+	command -v blkdiscard >/dev/null && blkdiscard ${EMMC}p4 2>>"$LOG"
+	mkfs.ext4 -F -L data ${EMMC}p4 >> "$LOG" 2>&1 || die "mkfs.ext4 p4"
+	say "p4 DATA created (ext4, label data)"
+fi
+mkdir -p /mnt/emmc-data
+if mount -t ext4 ${EMMC}p4 /mnt/emmc-data; then
+	mkdir -p /mnt/emmc-data/recamera /mnt/emmc-data/models
+	cp "$LOG" /mnt/emmc-data/recamera/emmc-install-$(date +%Y%m%d-%H%M%S).log
+	umount /mnt/emmc-data
+fi
+
+sync
+say "DONE. Power the camera off, take the SD card out and power it on: it boots from the eMMC, slot A."
+say "log: $LOG (a copy in /data/recamera/ on the eMMC)"

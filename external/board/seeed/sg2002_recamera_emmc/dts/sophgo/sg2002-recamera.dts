@@ -1,0 +1,833 @@
+// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+/*
+ * Seeed reCamera (Sophgo SG2002 / CV181x), project device tree.
+ *
+ * The hardware is transposed from the vendor board tree for this exact board,
+ * vendor/reCamera-OS/external/build/boards/cv181x/sg2002_recamera_emmc/dts_riscv/
+ * sg2002_recamera_emmc.dts (Cvitek kernel 5.10), into the labels the mainline
+ * 7.2 offers: emmc, sdhci0 (SD slot), sdhci1 (SDIO WiFi).  Only what the
+ * mainline can express today is declared here; the rest is driver work, one
+ * peripheral per measured boot.
+ *
+ * The pinmux IS expressible: the mainline header names the pads it knows
+ * (PIN_MIPI_TXM2, PIN_IIC0_SCL, ...) and the mux is a plain number, so any named
+ * pad can take any of its functions with PINMUX(pad, mux).  What the header does
+ * not carry is the FUNCTION number per pad; those come from the vendor pin table
+ * (vendor/reCamera-OS/freertos/cvitek/hal/cv181x/config/cv181x_pinlist_swconfig.h)
+ * and the pads this board actually wires are listed in the vendor board code
+ * (external/build/boards/cv181x/sg2002_recamera_emmc/u-boot/cvi_board_init.c).
+ * Both are quoted at each group below.
+ *
+ * Still missing on this board: GPIO bank 4 (porte, 0x5021000) has no node in the
+ * mainline, where the vendor hangs the blue LED (porte 24), the white LED
+ * (porte 0) and the camera enable (PWR_GPIO_6).
+ */
+
+/dts-v1/;
+
+#include "sg2002.dtsi"
+#include "sg2002-recamera-multimedia.dtsi"
+
+/ {
+	model = "Seeed reCamera";
+	compatible = "seeed,recamera", "sophgo,sg2002";
+
+	/*
+	 * Ethernet clocks, copied verbatim from the vendor DT that works
+	 * (vendor DT decompiled from the official FIT, vendor-dtb.dts:502-516): two fixed
+	 * clocks, 250 MHz for the MAC CSR and 50 MHz for PTP.  In the vendor
+	 * system the CCF gates clk_500m_eth0 and clk_axi4_eth0 are declared
+	 * CLK_IS_CRITICAL (old_linux_5.10/drivers/clk/cvitek/clk-cv181x.c:588-604)
+	 * and the MAC node consumes these fixed clocks, so no driver and no
+	 * runtime PM can ever close the MAC clocks.
+	 */
+	eth_csrclk: eth-csrclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-output-names = "eth_csrclk";
+		clock-frequency = <250000000>;
+	};
+
+	eth_ptpclk: eth-ptpclk {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-output-names = "eth_ptpclk";
+		clock-frequency = <50000000>;
+	};
+
+	/*
+	 * The vendor U-Boot builds the SD cmdline as root=/dev/mmcblk1p2
+	 * (SD_BOOTM_COMMAND, cv181x-asic.h:329) and the mmc core numbers the host
+	 * from the "mmc" alias (drivers/mmc/core/host.c:525, of_alias_get_id).
+	 * Without the aliases the SD was probed first and became mmcblk0, and the
+	 * kernel panicked on an absent mmcblk1p2.  These aliases match the vendor
+	 * U-Boot: eMMC 0, SD slot 1, wifi-sd 2.
+	 */
+	aliases {
+		serial0 = &uart0;
+		/*
+		 * The vendor declares serial0..serial4 (vendor-dtb.dts:1076-1080).
+		 * The alias is documentation here: the 8250 core takes the ttyS
+		 * number from the first free line (8250_of.c:288,
+		 * serial8250_register_8250_port), and no 8250 path calls
+		 * of_alias_get_id().
+		 */
+		serial1 = &uart1;
+		mmc0 = &emmc;
+		mmc1 = &sdhci0;
+		mmc2 = &sdhci1;
+		/*
+		 * The i2c aliases are what the vendor DT declares (i2c0..i2c4 over
+		 * 0x4000000..0x4040000), and they are what numbers /dev/i2c-N on his
+		 * system: /dev/i2c-1 is 4010000.i2c and /dev/i2c-2 is 4020000.i2c
+		 * (measured on the running vendor firmware).  Without them the two
+		 * enabled controllers would come up as i2c-0 and i2c-1.
+		 */
+		i2c1 = &i2c1;
+		i2c2 = &i2c2;
+	};
+
+	/*
+	 * ramoops (A3, 20/10/2026): 1 MiB at the top of the DRAM for the
+	 * kernel log of a hang or panic, kept across the watchdog reset and
+	 * read after the next boot in /sys/fs/pstore: 512 KiB console log of
+	 * the previous boot, 128 KiB pmsg (/dev/pmsg0, userspace), 3 x 128 KiB
+	 * oops/panic records. The ION region is placed by size below it.
+	 */
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		ramoops@8ff00000 {
+			compatible = "ramoops";
+			reg = <0x8ff00000 0x100000>;
+			console-size = <0x80000>;
+			pmsg-size = <0x20000>;
+			record-size = <0x20000>;
+		};
+	};
+
+	chosen {
+		stdout-path = "serial0:115200n8";
+	};
+
+	/*
+	 * SoC temperature (F7, patch 0021, vendor cv181x_base.dtsi tempsen).
+	 * SG2002 datasheet V1.0, section 2.5.2: recommended
+	 * junction temperature up to 85~105 C, destructive at 125 C, and the
+	 * in-package DRAM is only guaranteed to 115 C (contents may corrupt
+	 * above). The vendor critical trip (130 C) is past both limits.
+	 * The kernel only keeps the safety net; the cooling policy lives in
+	 * userspace (docs/multimedia.md):
+	 *  - hot (85 C, top of the recommended range): event to userspace;
+	 *  - critical (110 C, 5 C under the DRAM limit): emergency shutdown.
+	 */
+	thermal-zones {
+		soc-thermal {
+			polling-delay-passive = <1000>;
+			polling-delay = <1000>;
+			thermal-sensors = <&tempsen 0>;
+
+			trips {
+				soc_hot: soc-hot {
+					temperature = <85000>;
+					hysteresis = <5000>;
+					type = "hot";
+				};
+
+				soc_crit: soc-critical {
+					temperature = <110000>;
+					hysteresis = <0>;
+					type = "critical";
+				};
+			};
+		};
+	};
+
+	/*
+	 * The three LEDs, as the vendor declares them, transplanted to the
+	 * mainline labels.  The vendor DT (extracted from the official FIT,
+	 * vendor-dtb.dts:1187-1209) has led0 red = <&porta 15> with the
+	 * heartbeat trigger, led1 blue = <&porte 24> with the "mmc0" trigger and
+	 * default-state on, and led2 white = <&porte 0> with no trigger and
+	 * default-state off.
+	 *
+	 * The pads are muxed by the vendor U-Boot (cvi_board_init.c:
+	 * PINMUX_CONFIG(SPK_EN, XGPIOA_15); PINMUX_CONFIG(GPIO_ZQ, PWR_GPIO_24);
+	 * PINMUX_CONFIG(PWR_GPIO0, PWR_GPIO_0)) -- the U-Boot inside our own
+	 * fip.bin, which is the same reason CAM_EN works here with no pinctrl
+	 * group of ours in the DT.
+	 *
+	 * NOTE on the blue LED: "mmc0" is not a trigger driver, it is registered
+	 * by the mmc core per host (drivers/mmc/core/host.c:661
+	 * led_trigger_register_simple(dev_name(&host->class_dev), &host->led))
+	 * from the host index.  On the vendor system nothing aliases mmc, so his
+	 * mmc0 is whichever host probed first (measured: the SD slot).  Here the
+	 * aliases above are required by his own root=/dev/mmcblk1p2, so our mmc0
+	 * is the eMMC and our SD is mmc1: the trigger keeps the vendor's
+	 * spelling and therefore follows the eMMC on this build.
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led-red {
+			label = "red";
+			gpios = <&porta 15 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "heartbeat";
+			default-state = "on";
+		};
+
+		led-blue {
+			label = "blue";
+			gpios = <&porte 24 GPIO_ACTIVE_HIGH>;
+			linux,default-trigger = "mmc0";
+			default-state = "on";
+		};
+
+	};
+
+	/*
+	 * The white LED dims: its pad PWR_GPIO0 has function 4 = PWM_8, i.e.
+	 * PWM controller 2 channel 0 (patch 0022, pwm-cv1800), in place of the
+	 * vendor's on/off GPIO (porte 0). Brightness 0..255 in
+	 * /sys/class/leds/white. 25 kHz (40 us): far above the sensor's line
+	 * rate, so the camera's rolling shutter sees a steady light instead of
+	 * bright/dark bands (as a 1 kHz PWM would give).
+	 */
+	pwm-leds {
+		compatible = "pwm-leds";
+
+		led-white {
+			label = "white";
+			pwms = <&pwm2 0 40000 0>;
+			max-brightness = <255>;
+			default-state = "off";
+		};
+	};
+
+	/*
+	 * Restart and power-off through the RTC block, as the vendor does it
+	 * (cvi-reboot.c, "cvitek,restart", reg 0x05025000 + 0x2000, built obj-y
+	 * in his tree).  Mainline has no reset handler for this SoC and our
+	 * OpenSBI v0.9 has no SRST, so without this node "reboot" hangs at
+	 * "Restarting system".  Driver: patch 0009 (CONFIG_POWER_RESET_CVITEK).
+	 * The same block is the mainline rtc syscon; the driver maps it without
+	 * requesting the region.
+	 */
+	restart-controller@5025000 {
+		compatible = "cvitek,restart";
+		reg = <0x05025000 0x2000>;
+	};
+
+	/*
+	 * Audio: the onboard microphone on the internal ADC and the speaker
+	 * output on the internal DAC, wired as the vendor wires them
+	 * (vendor-dtb.dts): I2S0 (0x04100000) is RX only and feeds from the
+	 * ADC (0x0300A100); I2S3 (0x04130000) is TX only and drives the DAC
+	 * (0x0300A000).  DMA requests from the vendor sysdma_remap ch-remap:
+	 * CVI_I2S0_RX = 0, CVI_I2S3_TX = 7, routed to the Linux core (cpu 1,
+	 * vendor int_mux 0x7fc00).  Mainline drivers: sound/soc/sophgo
+	 * cv1800b-tdm, cv1800b-sound-adc, cv1800b-sound-dac; 48 kHz S16_LE,
+	 * I2S format, mclk = 256 fs; playback: I2S3 is clock master; capture: the
+ * ADC is clock master (fed by I2S3's MCLK) and I2S0 is the slave.
+	 * Card order follows the vendor: card 0 = capture (arecord hw:0,0),
+	 * card 1 = playback (aplay hw:1,0).
+	 */
+	i2s0: i2s@4100000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04100000 0x10000>;
+		clocks = <&clk CLK_APB_I2S0>, <&clk CLK_SDMA_AUD0>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 0 1>;
+		dma-names = "rx";
+		#sound-dai-cells = <0>;
+	};
+
+	i2s3: i2s@4130000 {
+		compatible = "sophgo,cv1800b-i2s";
+		reg = <0x04130000 0x10000>;
+		clocks = <&clk CLK_APB_I2S3>, <&clk CLK_SDMA_AUD3>;
+		clock-names = "i2s", "mclk";
+		dmas = <&dmamux 7 1>;
+		dma-names = "tx";
+		#sound-dai-cells = <0>;
+	};
+
+	/*
+	 * The ADC has no clock of its own: it runs from the MCLK output of I2S3
+	 * (vendor: clk_source = <0x4130000>, I2S3 mclk_out = "true").  Patch
+	 * 0011 makes the driver switch that output on (sophgo,mclk-source +
+	 * "mclk" = I2S3's CLK_SDMA_AUD3).  Measured before: capture without a
+	 * playback stream on I2S3 returns random full-scale data.
+	 */
+	audio_adc: audio-codec@300a100 {
+		compatible = "sophgo,cv1800b-sound-adc";
+		reg = <0x0300a100 0x100>;
+		clocks = <&clk CLK_SDMA_AUD3>;
+		clock-names = "mclk";
+		sophgo,mclk-source = <&i2s3>;
+		#sound-dai-cells = <0>;
+	};
+
+	audio_dac: audio-codec@300a000 {
+		compatible = "sophgo,cv1800b-sound-dac";
+		reg = <0x0300a000 0x100>;
+		#sound-dai-cells = <0>;
+	};
+
+	sound-mic {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "recamera-mic";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		/*
+		 * The ADC is the clock master and I2S0 the slave, as the vendor
+		 * machine driver sets it (cv181x_cv181xadc.c: SND_SOC_DAIFMT_I2S |
+		 * IB_NF | CBM_CFM).  With I2S0 as master the two clock domains run
+		 * unsynchronised and capture is random data most of the time.
+		 */
+		simple-audio-card,bitclock-master = <&mic_codec>;
+		simple-audio-card,frame-master = <&mic_codec>;
+
+		/*
+		 * system-clock-frequency = the real MCLK (256 x 48 kHz).  Without
+		 * it simple-audio-card takes the first clock of the I2S node (the
+		 * 300 MHz APB bus clock) as sysclk and the I2S logs
+		 * "clk_set_rate failed 300000000" at every boot.
+		 */
+		simple-audio-card,cpu {
+			sound-dai = <&i2s0>;
+			system-clock-frequency = <12288000>;
+		};
+
+		mic_codec: simple-audio-card,codec {
+			sound-dai = <&audio_adc>;
+			system-clock-frequency = <12288000>;
+		};
+	};
+
+	sound-speaker {
+		compatible = "simple-audio-card";
+		simple-audio-card,name = "recamera-speaker";
+		simple-audio-card,format = "i2s";
+		simple-audio-card,mclk-fs = <256>;
+		simple-audio-card,bitclock-master = <&spk_cpu>;
+		simple-audio-card,frame-master = <&spk_cpu>;
+
+		spk_cpu: simple-audio-card,cpu {
+			sound-dai = <&i2s3>;
+			system-clock-frequency = <12288000>;
+		};
+
+		simple-audio-card,codec {
+			sound-dai = <&audio_dac>;
+			system-clock-frequency = <12288000>;
+		};
+	};
+};
+
+/*
+ * System DMA (dw-axi-dmac) behind the dmamux: needed by the audio I2S.
+ *
+ * The SoC dtsi says "snps,axi-dma-1.01a"; with that the driver hands out any
+ * free channel, but the dmamux ties each request line to one fixed channel
+ * (the first cell of the dmamux specifier), so the peripheral's requests
+ * never reach the channel in use: measured, arecord -> "pcm_read: I/O error"
+ * and "apb_regs not initialized".  The driver has the SoC-specific match
+ * "sophgo,cv1800b-axi-dma" (AXI_DMA_FLAG_ARG0_AS_CHAN: use the routed
+ * channel), which is what this controller needs.
+ */
+&dmac {
+	compatible = "sophgo,cv1800b-axi-dma";
+	status = "okay";
+};
+
+/*
+ * The C906 of this board implements vector 0.7.1 (T-Head "xtheadvector"), not
+ * the ratified RVV 1.0.  The mainline cv180x-cpus.dtsi does not declare the
+ * extension, so it is declared here; without it the kernel never takes the
+ * T-Head path.  vlenb = 128 bits / 8 = 16 bytes.
+ */
+&cpu0 {
+	riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicntr", "zicsr",
+			       "zifencei", "zihpm", "xtheadvector";
+	thead,vlenb = <16>;
+};
+
+&osc {
+	clock-frequency = <25000000>;
+};
+
+&pinctrl {
+	uart0_cfg: uart0-cfg {
+		uart0-pins {
+			pinmux = <PINMUX(PIN_UART0_TX, 0)>,
+				 <PINMUX(PIN_UART0_RX, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	/*
+	 * UART1 -- the Bluetooth HCI of the onboard CYW43012 (ttyS1; the vendor
+	 * runs brcm_patchram_plus + hciattach there, S41bt-init).  Not the Morse
+	 * HaLow module: that one is the optional SDIO card in the SD slot.  The
+	 * vendor board code
+	 * muxes four pads (cvi_board_init.c: PINMUX_CONFIG(IIC0_SCL, UART1_TX);
+	 * PINMUX_CONFIG(IIC0_SDA, UART1_RX); PINMUX_CONFIG(JTAG_CPU_TMS, UART1_RTS);
+	 * PINMUX_CONFIG(JTAG_CPU_TCK, UART1_CTS)) and the pin table gives the
+	 * function numbers: IIC0_SCL__UART1_TX 1, IIC0_SDA__UART1_RX 1,
+	 * JTAG_CPU_TMS__UART1_RTS 4, JTAG_CPU_TCK__UART1_CTS 4
+	 * (cv181x_pinlist_swconfig.h:115-146).
+	 *
+	 * All four pads sit in VDDIO_SD0_EMMC with IO_TYPE_1V8_OR_3V3 -- the same
+	 * domain as the UART0 pads (pinctrl-sg2002.c:302-349) -- so power-source
+	 * stays 3300.  A second, different value for a domain the driver has
+	 * already seen makes the whole pin map fail (cv1800_set_power_cfg), which
+	 * is why this group must not drift from uart0_cfg.
+	 */
+	uart1_cfg: uart1-cfg {
+		uart1-pins {
+			pinmux = <PINMUX(PIN_IIC0_SCL, 1)>,
+				 <PINMUX(PIN_IIC0_SDA, 1)>,
+				 <PINMUX(PIN_JTAG_CPU_TMS, 4)>,
+				 <PINMUX(PIN_JTAG_CPU_TCK, 4)>;
+			/*
+			 * The pads come out of reset with the internal pull-down on
+			 * (measured: JTAG_CPU_TMS/TCK read 0x4c with pull-up only).
+			 * Patch 0014 makes the bias exclusive in the cv18xx driver, so
+			 * bias-pull-up alone now also clears the pull-down (it used to
+			 * need a second bias-pull-down = <0>, which pinconf-generic
+			 * rejects with "cannot have multiple bias configurations").
+			 */
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	sdhci0_cfg: sdhci0-cfg {
+		sdhci0-clk-pins {
+			pinmux = <PINMUX(PIN_SD0_CLK, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <16100>;
+			power-source = <3300>;
+		};
+
+		sdhci0-cmd-pins {
+			pinmux = <PINMUX(PIN_SD0_CMD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-data-pins {
+			pinmux = <PINMUX(PIN_SD0_D0, 0)>,
+				 <PINMUX(PIN_SD0_D1, 0)>,
+				 <PINMUX(PIN_SD0_D2, 0)>,
+				 <PINMUX(PIN_SD0_D3, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+
+		sdhci0-cd-pins {
+			pinmux = <PINMUX(PIN_SD0_CD, 0)>;
+			bias-pull-up;
+			drive-strength-microamp = <10800>;
+			power-source = <3300>;
+		};
+	};
+
+	/*
+	 * i2c1 carries the ADS1015.  The vendor board code wires it on two MIPI
+	 * pads: PINMUX_CONFIG(PAD_MIPI_TXM2, IIC1_SDA) and
+	 * PINMUX_CONFIG(PAD_MIPI_TXP2, IIC1_SCL) (cvi_board_init.c), and the pin
+	 * table gives the function numbers: PAD_MIPI_TXM2__IIC1_SDA 4,
+	 * PAD_MIPI_TXP2__IIC1_SCL 4.  Both pads sit in VDD18A_MIPI and are 1V8
+	 * only (pinctrl-sg2002.c pin data), so power-source is 1800 and the
+	 * drive strength is the first step of the 1V8 table
+	 * (sg2002_1v8_oc_map: 12800).
+	 */
+	i2c1_cfg: i2c1-cfg {
+		i2c1-pins {
+			pinmux = <PINMUX(PIN_MIPI_TXM2, 4)>,
+				 <PINMUX(PIN_MIPI_TXP2, 4)>;
+			/*
+			 * The pads come out of reset with their internal pull-down
+			 * enabled; with both pulls (60k up against 62k down) a released
+			 * line parks near half rail.  Measured: pad conf 0x0c (both)
+			 * before, 0x04 with the pull-down off.  Patch 0014 makes
+			 * bias-pull-up clear the pull-down by itself.
+			 */
+			bias-pull-up;
+			drive-strength-microamp = <12800>;
+			power-source = <1800>;
+		};
+	};
+
+	/*
+	 * White LED: PWR_GPIO0 -> function 4, PWM_8 (pinctrl-sg2002.c: mux at
+	 * 0x0a4, 1V8-only pad in the RTC domain). The vendor U-Boot leaves it
+	 * as GPIO (PWR_GPIO_0); this group takes it over at pwm2's probe.
+	 */
+	pwm8_cfg: pwm8-cfg {
+		pwm8-pins {
+			pinmux = <PINMUX(PIN_PWR_GPIO0, 4)>;
+			bias-disable;
+			drive-strength-microamp = <12800>;
+			power-source = <1800>;
+		};
+	};
+};
+
+&uart0 {
+	pinctrl-0 = <&uart0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * UART1, the Bluetooth HCI of the CYW43012 (BD address = WiFi MAC - 1, measured
+ * hci0 60:FF:9E:xx:xx:xx on the factory system).  Their DT declares it
+ * with clock-frequency = <25000000> -- the oscillator -- and no clocks property
+ * at all (vendor-dtb.dts:362-371):
+ *
+ *	serial@04150000 {
+ *		compatible = "snps,dw-apb-uart";
+ *		reg = <0 0x4150000 0 0x1000>;
+ *		clock-frequency = <0x17d7840>;	// 25 MHz
+ *		reg-shift = <2>;  reg-io-width = <4>;  status = "okay";
+ *		interrupts = <0x2d 4>;		// 0x2d = 45 = SOC_PERIPHERAL_IRQ(29)
+ *	};
+ *
+ * The mainline node keeps the register layout and the same interrupt number but
+ * takes the baud clock from the clock framework instead (clocks = <&clk CLK_UART1>,
+ * <&clk CLK_APB_UART1>, names "baudclk" and "apb_pclk", plus resets = <&rst RST_UART1>),
+ * so no clock-frequency is needed here.
+ */
+&uart1 {
+	pinctrl-0 = <&uart1_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+};
+
+/*
+ * The ADS1015 on i2c1, exactly as the vendor declares it: reg 0x48 with channel
+ * 4 enabled (AIN0 against GND), gain 1 and datarate 2.  Binding:
+ * Documentation/devicetree/bindings/iio/adc/ti,ads1015.yaml; driver TI_ADS1015
+ * (drivers/iio/adc/ti-ads1015.c), which the seed now builds in instead of as a
+ * module, so the sensor is there without modprobe.
+ */
+&i2c1 {
+	/*
+	 * FULL A/B test against the vendor DT, now extracted from the official FIT
+	 * itself (emmc-usbdl/boot.emmc -> images/fdt-sg2002_recamera_emmc). There
+	 * the i2c1 node is:
+	 *
+	 *	reg = <0x04010000 0x1000>;      (4 KiB -- the whole designware block)
+	 *	clocks = <&clk 114>;            (ONE clock only: CV180X_CLK_I2C)
+	 *	clock-frequency = <400000>;
+	 *	reset-names = "i2c1";
+	 *
+	 * The mainline cv180x.dtsi declares a reg of 0x10000 (64 KiB) and TWO clocks
+	 * (CLK_I2C + CLK_APB_I2C1, named "ref"/"pclk").  Neither had been tried in
+	 * the previous A/B, which only changed clock-frequency and pinctrl-0, both
+	 * still dropped.  Here the node goes whole, as the vendor's (the single
+	 * clock also removes "pclk", which the driver takes as optional, and with
+	 * it clk_apb_i2c1 is never enabled).
+	 */
+	reg = <0x04010000 0x1000>;
+	clocks = <&clk CLK_I2C>;
+	/delete-property/ clock-names;
+	clock-frequency = <100000>;
+	status = "okay";
+
+	adc@48 {
+		compatible = "ti,ads1015";
+		reg = <0x48>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+		#io-channel-cells = <1>;
+
+		channel@4 {
+			reg = <4>;
+			ti,gain = <1>;
+			ti,datarate = <2>;
+		};
+	};
+};
+
+/*
+ * i2c2 is the camera bus, and it is the one bus on this board that has a
+ * device: on the running vendor firmware `i2cdetect -y 2` answers at 0x36 and
+ * /proc/interrupts shows five interrupts on 4020000.i2c, while the same scan
+ * on his i2c1 finds nothing at all.  His board DT enables it with nothing but
+ * `status = "okay"` -- no pinctrl group -- because his U-Boot wires the pads
+ * for him (cvi_board_init.c: PINMUX_CONFIG(PWR_GPIO1, IIC2_SCL) +
+ * PINMUX_CONFIG(PWR_GPIO2, IIC2_SDA), function 6 on pads 48/49, both in
+ * VDDIO_RTC, 1V8 only), and that very U-Boot is the one inside our fip.bin.
+ * The pads are muxed before Linux starts, exactly as on his system.
+ */
+&i2c2 {
+	status = "okay";
+};
+
+/*
+ * The PWR bank (porte): the camera enable and the blue and white LEDs live
+ * here.  The mainline declares gpio0..gpio3 at 0x3020000..0x3023000 but has no
+ * node at all for 0x5021000; the vendor DT has one and it uses the plain
+ * DesignWare bindings (snps,dw-apb-gpio / snps,dw-apb-gpio-port) -- the driver
+ * the mainline already builds in (CONFIG_GPIO_DWAPB=y, drivers/gpio/gpio-dwapb.c).
+ * Only the node is missing; there is no driver to port.
+ *
+ * CAM_EN is line 6 of this bank (PWR_GPIO_6, "gpio358" in vendor terms; pad
+ * PWR_WAKEUP0 muxed to it by the same vendor U-Boot).  On his running system
+ * it measures direction=out, value=1 -- and it is his userspace that drives it,
+ * nothing in his kernel and nothing in the U-Boot.  The hog below does the same
+ * thing from the kernel, so the camera rail is up before any driver probes.
+ *
+ * The node has to sit INSIDE /soc: that is where the mainline declares
+ * gpio0..gpio3, and it is /soc that carries "interrupt-parent = <&plic>"
+ * (cv180x.dtsi:23).  On the root node the port's "interrupts" has no parent,
+ * fwnode_irq_get() comes back empty, and the driver prints
+ *
+ *	gpio-dwapb 5021000.gpio: no IRQ for port0
+ *
+ * (measured) -- the bank works as plain I/O but none of its lines can raise an
+ * interrupt.  The vendor put the node at the root and wrote interrupt-parent
+ * explicitly; inside /soc we inherit it.
+ */
+&{/soc} {
+	/*
+	 * SoC watchdog (vendor cv181x_base.dtsi cv-wd@0x3010000, DesignWare).
+	 * "sophgo,cv1800-wdt" (patch 0023) sets bit 8 of TOP + 0x8 at probe:
+	 * without it a timeout does not reset the chip (no boot stage sets it).
+	 * Fed by /etc/init.d/S02watchdog; a hung system reboots by itself.
+	 */
+	watchdog@3010000 {
+		compatible = "sophgo,cv1800-wdt", "snps,dw-wdt";
+		reg = <0x3010000 0x1000>;
+		clocks = <&clk CLK_APB_WDT>;
+		resets = <&rst RST_WDT>;
+		sophgo,top-syscon = <&syscon>;
+	};
+
+	/*
+	 * PWM controller 2 (channels PWM_8..11), as the vendor cv181x_base.dtsi
+	 * pwm@3062000. Mainline has no PWM nodes for this SoC.
+	 */
+	pwm2: pwm@3062000 {
+		compatible = "sophgo,cv1800-pwm";
+		reg = <0x3062000 0x1000>;
+		clocks = <&clk CLK_PWM>;
+		#pwm-cells = <3>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&pwm8_cfg>;
+	};
+
+	gpio@5021000 {
+		compatible = "snps,dw-apb-gpio";
+		reg = <0x5021000 0x1000>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		porte: gpio-controller@4 {
+			compatible = "snps,dw-apb-gpio-port";
+			gpio-controller;
+			#gpio-cells = <2>;
+			ngpios = <32>;
+			reg = <0>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			interrupts = <SOC_PERIPHERAL_IRQ(54) IRQ_TYPE_LEVEL_HIGH>;
+
+			cam-en-hog {
+				gpio-hog;
+				gpios = <6 GPIO_ACTIVE_HIGH>;
+				output-high;
+				line-name = "cam-en";
+			};
+		};
+	};
+};
+
+/*
+ * The eMMC pads are left at their reset defaults on purpose: the vendor board
+ * code does not touch them either (no EMMC_* entry in its pin table), which is
+ * why the upstream cv1812h-huashan-pi board also enables &emmc with no pinctrl
+ * group.  The vendor caps this board at 50 MHz, not the 200 MHz / HS200 of the
+ * huashan-pi.
+ */
+&emmc {
+	status = "okay";
+	bus-width = <4>;
+	max-frequency = <50000000>;
+	non-removable;
+	no-sd;
+	no-sdio;
+};
+
+/*
+ * The SD slot: this is what the card boots from (the rootfs is its p2).  The
+ * pin group is the upstream sg2002-licheerv-nano-b.dts one.
+ */
+/*
+ * The SD slot also takes the optional HaLow module (Morse Micro MM6108,
+ * "fgh100m" add-on board) as an SDIO card, as the vendor board DT does
+ * (sg2002_recamera_emmc.dts: &sd drops no-sdio and adds mm610x-sdio with
+ * reset-gpios = <&portc 12>).  The module goes in place of the SD card, so it
+ * is used with the system on the eMMC; with a card in the slot the child node
+ * is inert.  Driver: package morse-driver (morse.ko, dot11ah.ko).
+ */
+&sdhci0 {
+	pinctrl-0 = <&sdhci0_cfg>;
+	pinctrl-names = "default";
+	status = "okay";
+	bus-width = <4>;
+	max-frequency = <50000000>;
+	no-1-8-v;
+	no-mmc;
+	disable-wp;
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	mm610x_sdio: mm610x-sdio@2 {
+		compatible = "morse,mm610x";
+		reg = <2>;
+		reset-gpios = <&portc 12 GPIO_ACTIVE_HIGH>;
+	};
+};
+
+/*
+ * The SDIO WiFi (Cypress/Infineon CYW43012, brcmfmac), wired as the vendor
+ * wires it: wifisd (4320000.mmc).
+ *
+ * max-frequency is NOT the vendor's 50000000.  The vendor driver
+ * (sdhci-cv181x) never reaches it: its bus runs at 46875000 (measured,
+ * /sys/kernel/debug/mmc2/ios on the factory 5.10).  The mainline dwcmshc
+ * reaches 50 MHz exactly, and at 50 MHz the SDIO lines next to the radio
+ * jam 2.4 GHz channels 5-7: the AP on channel 6 drops out of scans and every
+ * join on it fails with SET_SSID status 1 (ASSOC-REJECT 16), while channels
+ * 1 and 36 associate.  Measured on 2026-10-18 by changing only this bus:
+ * 50 MHz -> 5/5 rejected; 37.5 MHz -> COMPLETED, DHCP, 0% ping loss
+ * (eMMC and SD at 50 MHz made no difference).  37.5 MHz is what this
+ * divider gives for any request below 50 MHz.
+ */
+&sdhci1 {
+	status = "okay";
+	bus-width = <4>;
+	max-frequency = <37500000>;
+	cap-sdio-irq;
+	no-mmc;
+	no-sd;
+	non-removable;
+	disable-wp;
+};
+
+/*
+ * USB-C as a device, like the vendor: his usb-net.sh switches the port to
+ * device (uhubon.sh device -> /proc/cviusb/otg_role) and exposes an NCM
+ * gadget as usb0 = 192.168.42.1.  Here the role is fixed by dr_mode and the
+ * gadget is built by /etc/init.d/S45usbnet over configfs.
+ */
+&usb {
+	dr_mode = "peripheral";
+	status = "okay";
+};
+
+/* The mdio-mux@3009800 (label `mdio` in cv180x.dtsi:60) goes: its parent bus is
+ * gmac0_mdio, which the mirror of the vendor node removes (just below), and so
+ * the register 0x3009800 -- the same one the glue writes in the ePHY bring-up --
+ * has a single owner. */
+/delete-node/ &mdio;
+
+/* Ethernet: a mirror of the node that works in the vendor kernel (the DT of the
+ * official FIT, lines 541-562). That node has phy-mode "rmii", NO mdio subnode,
+ * NO phy-handle and NO reset. Without an mdio subnode and a phy-handle stmmac
+ * registers the MAC's own bus and finds the PHY by scanning (stmmac_mdio.c:
+ * phy_find_first, which also fills plat->phy_addr) -- that is its mechanism,
+ * not the mux. The PHY driver (CVITEK CV182XA, id 0x00435649) comes from
+ * patch 0001 in external/patches. */
+&gmac0 {
+	/* 7.2 does NOT find the MAC class from the hardware version, as the
+	 * vendor 5.10 did: stmmac_platform.c:501-527 only sets
+	 * core_type = DWMAC_CORE_GMAC when the node carries one of these
+	 * mainline compatibles. Without it core_type stays 0 (MAC100), the
+	 * driver takes the dwmac100 ops, the DMA cap does not answer and the
+	 * MDIO bus does not register (error -EIO). So the node keeps the second
+	 * compatible, unlike the vendor node, which declares only its own. */
+	compatible = "cvitek,ethernet", "snps,dwmac-3.70a";
+	clocks = <&eth_csrclk>, <&eth_ptpclk>;
+	ephy_base_reg = <0x3009000>;
+	ephy_top_reg = <0x3009800>;
+	/delete-property/ resets;
+	/delete-property/ reset-names;
+	phy-mode = "rmii";
+	/*
+	 * The vendor node has snps,multicast-filter-bins = <0>; mainline warns
+	 * "Hash table entries set to unexpected value 0" and falls back to 64.
+	 * Declare the 64 it ends up using.
+	 */
+	snps,multicast-filter-bins = <64>;
+	phy-handle = <&ephy0>;
+	status = "okay";
+
+	/*
+	 * The SoC dtsi's mdio carries the mdio-mux at 0x3009800, which the glue
+	 * also writes; it goes.  Without any mdio subnode stmmac found the PHY
+	 * by scanning ("Deprecated MDIO bus assumption used").  A plain MDIO bus
+	 * with the internal PHY at address 0 (measured: stmmac-0:00, CVITEK
+	 * CV182XA, id 0x00435649) is the same PHY, declared.
+	 */
+	/delete-node/ mdio;
+
+	mdio {
+		compatible = "snps,dwmac-mdio";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		ephy0: ethernet-phy@0 {
+			reg = <0>;
+		};
+	};
+};
+
+/* AXI tuning of the MAC, the vendor's exact array (vendor-dtb.dts:518-523):
+ * blen <4 8 16 0 0 0 0>, rd_osr_lmt 2, wr_osr_lmt 1.  The mainline dtsi has
+ * blen <16 8 4 0 0 0 0>, which is not what the working system runs. */
+&gmac0_stmmac_axi_setup {
+	snps,blen = <4 8 16 0 0 0 0>;
+};
+
+/*
+ * WIFI_REG_ON / BT_REG_ON -- GPIOA 30 (gpio510), the pad the WiFi module
+ * needs powered on.  Two mirrors, both from the vendor system that works:
+ *
+ *  - the vendor U-Boot muxes the pad to GPIO before the kernel starts
+ *    (cvi_board_init.c:4, "PINMUX_CONFIG(AUX0, XGPIOA_30); // BT_REG_ON &
+ *    WIFI_REG_ON -- gpio510").  Our image boots that same U-Boot (the fip.bin
+ *    is byte-identical to the vendor's), so the pad function already matches;
+ *
+ *  - the vendor board DT declares the level as active high
+ *    (sg2002_recamera_emmc.dts:157-162: wifi_pin { compatible =
+ *    "cvitek,wifi-pin"; poweron-gpio = <&porta 30 GPIO_ACTIVE_HIGH>; }).
+ *    In the vendor kernel the consumer of that node is the out-of-tree
+ *    bcmdhd driver (osdrv/extdrv/wireless/broadcom/bcmdhd/dhd_gpio.c:296,
+ *    gpio_wl_reg_on = cvi_get_wifi_pwr_on_gpio()), not brcmfmac, so on that
+ *    system nothing in the brcmfmac path holds the pin as an output either.
+ *
+ * Our kernel has no consumer for that node, so the power-on level is held
+ * here with a hog instead: same state the working system runs in, on every
+ * boot, whatever probes first.
+ */
+&porta {
+	wifi_reg_on: wifi-reg-on {
+		gpio-hog;
+		gpios = <30 GPIO_ACTIVE_HIGH>;
+		output-high;
+		line-name = "wifi_reg_on";
+	};
+};

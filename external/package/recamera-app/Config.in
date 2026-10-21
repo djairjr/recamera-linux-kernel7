@@ -1,0 +1,12 @@
+config BR2_PACKAGE_RECAMERA_APP
+	bool "recamera-app (recamerad and the recamera-* tools, Rust)"
+	depends on BR2_PACKAGE_HOST_RUSTC_TARGET_ARCH_SUPPORTS
+	depends on BR2_INSTALL_LIBSTDCPP # sophgo-cviruntime
+	select BR2_PACKAGE_HOST_RUSTC
+	select BR2_PACKAGE_SOPHGO_MPI
+	select BR2_PACKAGE_SOPHGO_CVIRUNTIME
+	select BR2_PACKAGE_OPENSSL # WebRTC (DTLS/SRTP)
+	help
+	  The reCamera application: the recamerad daemon (camera, YOLO
+	  detection, streaming, configuration), from app/ of this tree.
+	  docs/application.md.

@@ -1,0 +1,33 @@
+From: Djair Guilherme <djair.jr@gmail.com>
+Subject: [PATCH] mpi: fix the two GCC 15 warnings of the vendor MPI
+
+- cvi_thermal.c: wake-up buffer sent uninitialized
+- teaisp_pq_ctrl.c: leave_scene_snow() copied snow_tun_attr[0] onto itself
+  instead of into [1] (real bug, see the comment it carries)
+
+diff --color -ruN a/modules/isp/cv181x/isp/src/teaisp_pq_ctrl.c b/modules/isp/cv181x/isp/src/teaisp_pq_ctrl.c
+--- a/modules/isp/cv181x/isp/src/teaisp_pq_ctrl.c	2026-10-18 20:42:32.247924042 -0300
++++ b/modules/isp/cv181x/isp/src/teaisp_pq_ctrl.c	2026-10-18 20:42:32.269609060 -0300
+@@ -697,7 +697,9 @@
+ 
+ 	ISP_EXPOSURE_ATTR_S exposure_attr_set;
+ 	struct snow_tuning_attr *p0 = &runtime->snow_tun_attr[0];
+-	struct snow_tuning_attr *p1 = &runtime->snow_tun_attr[0];
++	/* reCamera: was &snow_tun_attr[0] (p0 again), a self-copy that never saved
++	 * [0] into [1] as the comment below says (GCC -Wrestrict) */
++	struct snow_tuning_attr *p1 = &runtime->snow_tun_attr[1];
+ 
+ 	CVI_ISP_GetExposureAttr(ViPipe, &exposure_attr_set);
+ 
+diff --color -ruN a/modules/sys/src/cvi_thermal.c b/modules/sys/src/cvi_thermal.c
+--- a/modules/sys/src/cvi_thermal.c	2026-10-18 20:42:32.244924110 -0300
++++ b/modules/sys/src/cvi_thermal.c	2026-10-18 20:42:32.269523510 -0300
+@@ -662,7 +662,7 @@
+ 
+ 	g_is_thermal_running = CVI_FALSE;
+ 	if (thermal_thread) {
+-		char buf[8];
++		char buf[8] = { 0 };	/* reCamera: was sent uninitialized (only wakes the thread) */
+ 
+ 		write(therm_sockets[0], buf, 8);
+ 		pthread_join(thermal_thread, NULL);

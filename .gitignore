@@ -1,0 +1,15 @@
+# Build products and caches (docs/build-environment.md §1)
+/output/
+/dl/
+/.ccache/
+/work/
+# Files of one installation (Wi-Fi network, private notes): never versioned
+/local/
+# The vendor SDK checkout, when kept next to the tree for scripts/port.sh
+/vendor/
+# Measurements and captures of the development (MACs, addresses, pictures)
+/evidencia/
+# Rust build output, if built outside the container
+/app/target/
+# Model weights (Ultralytics models are AGPL-3.0; they live in the camera's /data/models)
+*.cvimodel

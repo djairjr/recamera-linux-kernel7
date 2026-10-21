@@ -1,0 +1,14 @@
+config BR2_PACKAGE_MORSE_DRIVER
+	bool "morse-driver (HaLow, Morse Micro MM610x)"
+	depends on BR2_LINUX_KERNEL
+	help
+	  Morse Micro 802.11ah (Wi-Fi HaLow) driver for the optional reCamera
+	  HaLow module (fgh100m, MM6108 over SDIO in the SD slot): morse.ko and
+	  dot11ah.ko.  Source: upstream release 1.14.1
+	  (github.com/MorseMicro/morse_driver, the release the vendor image
+	  shipped), ported to Linux 7.2 by
+	  0001-port-to-linux-7.2.patch.  Same kernel options as the vendor:
+	  MORSE_SDIO, MORSE_USER_ACCESS, MORSE_VENDOR_COMMAND.
+
+comment "morse-driver needs a Linux kernel"
+	depends on !BR2_LINUX_KERNEL

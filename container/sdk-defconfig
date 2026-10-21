@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Minimal Buildroot configuration whose only product is the riscv64/musl cross
+# toolchain carried by the build image.  No kernel, no bootloader, no packages:
+# just the toolchain, plus a tar rootfs so the `world` target (which `make sdk`
+# depends on) has something to finish with.
+#
+# The architecture block mirrors the project defconfig,
+# external/configs/sg2002_recamera_emmc_defconfig.  Keep the two in step: the
+# toolchain must be built for the target the project declares.
+#
+# GCC 15.3.0 is the newest the adopted line (2026.05.3) offers, and the same
+# version as the host compiler; kernel headers 5.10 match the vendor kernel the
+# drivers are ported from.
+
+BR2_riscv=y
+BR2_riscv_custom=y
+BR2_RISCV_ISA_RVM=y
+BR2_RISCV_ISA_RVA=y
+BR2_RISCV_ISA_RVF=y
+BR2_RISCV_ISA_RVD=y
+BR2_RISCV_ISA_RVC=y
+BR2_RISCV_64=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+BR2_GCC_VERSION_15_X=y
+
+# C++ and OpenMP: they are what the vendor toolchain carried (its own Buildroot
+# defconfig enabled the equivalent options), and the application phase
+# (OpenCV/FFmpeg) is C++.  Built here, once, so the project never has to grow a
+# second toolchain later.
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+BR2_GCC_ENABLE_OPENMP=y
+BR2_KERNEL_HEADERS_5_10=y
+BR2_PACKAGE_HOST_ENVIRONMENT_SETUP=y
+BR2_TARGET_ROOTFS_TAR=y
+
+# Toolchain patches (container/patches): GCC defaults to -mno-fence-tso,
+# because the SG2002's T-Head C906 traps on fence.tso; the plain fence rw,rw
+# it emits instead is a stronger barrier. Rebuilds libstdc++/libgomp too.
+BR2_GLOBAL_PATCH_DIR="/build/patches"
