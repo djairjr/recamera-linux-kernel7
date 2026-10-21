@@ -162,8 +162,10 @@ container/run.sh make all                              # an explicit goal is req
 | a patch, `Kbuild` or `.mk` of a local package (`sophgo-*`, `recamera-*`) | `make <package>-dirclean all`: `-rebuild` re-applies the patches and fails with "duplicate filename" |
 | the rootfs overlay | `make all`; a file **removed** from the overlay stays in `output/.../target` until `make clean` |
 
-After a build: `scripts/slot-update.sh --switch`, test, then the same on the other slot so
-both are equal.
+After a build: upload `output/.../images/recamera-update-*.rcu` on the System page (or
+`scripts/slot-update.sh --switch` from the PC), test, then the same on the other slot so both
+are equal. `slot-update.sh` switches without a trial: the automatic fallback only follows
+updates made from the page.
 
 ## 8. Editing a Sophgo port (`scripts/port.sh`)
 

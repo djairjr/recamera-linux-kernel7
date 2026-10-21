@@ -80,8 +80,10 @@ will do, then `emmc-install --yes`. Power off, remove the card, power on.
   `tools/recamera-convert` and upload the `.cvimodel` and `.json` on the YOLO page, or
   extract the factory ones with `scripts/models.sh` from the official Seeed image;
 - updates: on the System page, upload `output/sg2002_recamera_emmc/images/recamera-update-*.rcu`
-  (written into the slot not in use, then "Reboot into the new version"), or from the PC
-  `scripts/slot-update.sh --switch`; the previous slot stays as it was.
+  (written into the slot not in use, then "Reboot into the new version"). The new version
+  boots on trial and confirms itself after 60 s running with video; if it does not come up
+  three times, the camera goes back to the previous version by itself and the page says so.
+  From a PC: `scripts/slot-update.sh --switch` (no trial); the previous slot stays as it was.
 
 More in `docs/build-environment.md`.
 
@@ -117,7 +119,9 @@ docs/           the documentation (below)
   eMMC boot partition, or from the card's FAT when a card is inserted. U-Boot reads its
   environment from the eMMC (8 MiB offset, outside every partition) and boots
   `boot-<slot>.itb` (a FIT: gzip kernel + DT) with `root=/dev/mmcblk0p2|3`. If the slot's
-  kernel is missing it boots the other slot with `recamera.fallback=1`.
+  kernel is missing it boots the other slot with `recamera.fallback=1`. After an update from
+  the page the new slot runs on trial: U-Boot counts its boots and, if the system has not
+  confirmed itself after three, boots the previous slot (`docs/emmc-layout.md` §6).
 - **eMMC:** MBR; p1 FAT32 with both kernels, p2/p3 the two 8 GiB root filesystems, p4
   `/data` (everything that survives updates: configuration, passwords, Wi-Fi networks,
   models, logs, crash reports).

@@ -151,8 +151,9 @@ The page (`recamerad/web/`, plain HTML/JS/CSS, no framework) is built into the b
   picture sent and the answer), the last answers.
 - **System:** version, slot, addresses, uptime, temperature, load, memory, YOLO and camera
   rates; time zone; password; terminal on/off; **update** (the version in each slot, upload
-  of a `recamera-update-*.rcu` into the slot not in use with its progress, reboot into it:
-  `docs/emmc-layout.md` §6); reboot; the last 300 log lines; crash reports (pstore).
+  of a `recamera-update-*.rcu` into the slot not in use with its progress, reboot into it on
+  trial, which recamerad confirms after 60 s with video flowing, and a notice when a version
+  did not come up and the camera went back: `docs/emmc-layout.md` §6); reboot; the last 300 log lines; crash reports (pstore).
 - **Terminal:** a login on the camera (`/bin/login` on a PTY): user and password, then that
   account's shell; up to 4 at once; the `Origin` is checked; stays open across sections.
 
