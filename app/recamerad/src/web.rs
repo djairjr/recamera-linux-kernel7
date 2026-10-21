@@ -188,8 +188,12 @@ async fn handle(w: Arc<Web>, req: Request<Incoming>, local: IpAddr) -> Result<Re
                 (&Method::POST, "/api/logout") => logout(&w, &req),
                 (&Method::GET, "/api/session") => json(StatusCode::OK, &serde_json::json!({ "user": user })),
                 (&Method::GET, "/api/config") => {
-                    let c = w.config.borrow().clone();
-                    json(StatusCode::OK, &c)
+                    // the saved configuration, not the running one: after a
+                    // save the daemon applies it a moment later (a model
+                    // change restarts the pipeline first), and a page that
+                    // read the running one then saved it back again undid
+                    // the change (a model switch reverted by the next slider)
+                    json(StatusCode::OK, &saved_config(&w))
                 }
                 (&Method::POST, "/api/config") => set_config(&w, req).await,
                 (&Method::GET, "/api/status") => json(StatusCode::OK, &status(&w)),
@@ -237,11 +241,11 @@ async fn handle(w: Arc<Web>, req: Request<Incoming>, local: IpAddr) -> Result<Re
                     r
                 }
                 (&Method::GET, "/api/labels") => {
-                    let m = media::model_path(&w.config.borrow().detection.model);
+                    let m = media::model_path(&saved_config(&w).detection.model);
                     json(StatusCode::OK, &media::load_labels(&m))
                 }
                 (&Method::GET, "/api/models") => {
-                    let active = w.config.borrow().detection.model.clone();
+                    let active = saved_config(&w).detection.model;
                     json(StatusCode::OK, &system::models(&active))
                 }
                 (&Method::PUT, p) if p.starts_with("/api/models/") => {
@@ -523,6 +527,17 @@ async fn upload_model(req: Request<Incoming>, name: &str) -> Response<RespBody> 
             json(StatusCode::OK, &serde_json::json!({ "name": name, "size": total }))
         }
         Err(e) => bad(e),
+    }
+}
+
+/// The configuration as saved (what the page last chose), not the running
+/// one: the daemon applies a save a moment later (a model change restarts
+/// the pipeline first), and pages that read the running one in between got
+/// the old model back (and saved it again with the next slider).
+fn saved_config(w: &Web) -> Config {
+    match config::load(&w.config_path) {
+        Ok(config::Loaded::File(c)) | Ok(config::Loaded::Created(c)) => c,
+        Err(_) => w.config.borrow().clone(),
     }
 }
 

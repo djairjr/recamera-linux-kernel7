@@ -185,6 +185,11 @@ function fmtSize(b) { return b > 1 << 20 ? (b / (1 << 20)).toFixed(1) + " MB" : 
 // the detector decodes YOLOv8/11 detection outputs: classify, pose and
 // segment models (same family, other heads) cannot be used
 async function loadModels() {
+  // the result of a model switch, kept across the page reload that follows it
+  try {
+    const msg = sessionStorage.getItem("model-state");
+    if (msg) { $("#model-state").textContent = msg; sessionStorage.removeItem("model-state"); }
+  } catch {}
   const list = await api("/api/models").catch(() => []);
   const ul = $("#models");
   ul.innerHTML = list.length ? "" : "<li class=muted>No model in /data/models</li>";
@@ -210,21 +215,21 @@ async function loadModels() {
         try {
           await api("/api/config", config);
         } catch (err) { st.textContent = `${m.name}: ${err.message}`; return; }
-        await reloadConfig();
-        // the pipeline restarts with the model: wait for it, then say what it is
-        // (until then /api/model and /api/labels still describe the old one)
+        // the pipeline restarts with the model: wait for it, then reload the
+        // whole page so nothing on it describes the previous model
         for (let i = 0; i < 15; i++) {
           await new Promise((r) => setTimeout(r, 700));
           await loadModelInfo();
           if (modelInfo.model === m.name || modelInfo.error) break;
         }
-        await loadLabels();
-        st.textContent = modelInfo.model === m.name
+        const msg = modelInfo.model === m.name
           ? `${m.name}: ${modelInfo.task}, ${modelInfo.classes.length} classes` +
             (modelInfo.keypoints ? `, ${modelInfo.keypoints} keypoints` : "") +
             `, input ${modelInfo.input[0]}×${modelInfo.input[1]}` +
             (modelInfo.warning ? `. Warning: ${modelInfo.warning}` : "")
           : `${m.name}: not loaded` + (modelInfo.error ? `: ${modelInfo.error}` : " (see the System log)");
+        try { sessionStorage.setItem("model-state", msg); } catch {}
+        location.reload();
       };
       const del = document.createElement("button");
       del.type = "button";
