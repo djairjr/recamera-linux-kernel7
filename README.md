@@ -74,9 +74,10 @@ will do, then `emmc-install --yes`. Power off, remove the card, power on.
   password `recamera` — **change it on the System page** (it changes the system password,
   ssh included);
 - RTSP: `rtsp://recamera:<password>@<camera>/live`;
-- models: the image ships no weights (Ultralytics models are AGPL-3.0). Upload a
-  `.cvimodel` for cv181x with its `.json` on the YOLO page, or extract the factory ones
-  with `scripts/models.sh` from the official Seeed image;
+- models: the image ships no weights (Ultralytics models are AGPL-3.0). Convert your own
+  YOLOv8/YOLO11 model (detect, pose, segment, classify; `.pt` or `.onnx`) on a PC with
+  `tools/recamera-convert` and upload the `.cvimodel` and `.json` on the YOLO page, or
+  extract the factory ones with `scripts/models.sh` from the official Seeed image;
 - updates: `scripts/slot-update.sh --switch` writes a new build to the inactive slot over
   ssh and boots it; the previous slot stays as it was.
 
@@ -93,6 +94,7 @@ external/       the br2-external tree: defconfig, board files (DT, kernel config
   package/recamera-*   boot firmware, firmware blobs, the application, test programs
   package/morse-*      Morse Micro HaLow driver and tools
 app/            the Rust workspace (recamerad and friends)
+tools/          PC-side tools: recamera-convert (YOLO .pt/.onnx -> .cvimodel for the NPU)
 scripts/        deployment, port editing, models, diagnostics
 tests/          small C check programs of the port
 docs/           the documentation (below)

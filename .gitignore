@@ -11,5 +11,6 @@
 /evidencia/
 # Rust build output, if built outside the container
 /app/target/
+/tools/*/target/
 # Model weights (Ultralytics models are AGPL-3.0; they live in the camera's /data/models)
 *.cvimodel

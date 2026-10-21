@@ -230,6 +230,23 @@ impl Yolo {
         }
     }
 
+    /// For diagnosis: each output's name and shape, and the minimum and
+    /// maximum of its first `channels` channels (NCHW, after the last
+    /// inference).
+    pub fn output_stats(&self, channels: usize) -> Vec<(String, Vec<i32>, Vec<(f32, f32)>)> {
+        (0..self.model.outputs()).map(|o| {
+            let t = self.model.output(o);
+            let s = t.shape();
+            let v = Vals::of(&t);
+            let c = s.get(1).copied().unwrap_or(1).max(1) as usize;
+            let plane: usize = s.iter().skip(2).map(|&d| d.max(1) as usize).product();
+            let mm = (0..c.min(channels)).map(|ch| {
+                (0..plane).map(|i| v.get(ch * plane + i)).fold((f32::MAX, f32::MIN), |(a, b), x| (a.min(x), b.max(x)))
+            }).collect();
+            (t.name(), s, mm)
+        }).collect()
+    }
+
     /// Detection only, as before: infer and decode boxes (recamera-yolo).
     pub fn detect_rgb(&mut self, rgb: &[u8], target: Option<u32>, thr: f32, iou: f32, out: &mut Results)
         -> Result<(), String> {

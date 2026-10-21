@@ -1,0 +1,20 @@
+[package]
+name = "recamera-convert"
+description = "Convert a YOLOv8/YOLO11 model (.pt or .onnx) to a .cvimodel for the reCamera NPU, with its .json"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+authors = ["Djair Guilherme <djair.jr@gmail.com>"]
+rust-version = "1.85"
+
+# A host tool, not part of the camera's workspace (app/)
+[workspace]
+
+[dependencies]
+lexopt = "0.3"
+serde_json = "1"
+# the same output-layout check the camera's daemon uses
+recamera-detect = { path = "../../app/recamera-detect" }
+
+[profile.release]
+strip = true

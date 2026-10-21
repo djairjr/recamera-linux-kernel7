@@ -92,7 +92,8 @@ appears is emulated by the firmware anyway.
 | `events` | `socket` (`/run/recamerad/events.sock`) |
 
 Models live in `/data/models`: a `.cvimodel` for the cv181x NPU (RGB input) and a `.json`
-next to it with `"classes": [...]`. Ultralytics weights are AGPL-3.0, so none ship in the
+next to it with `"classes": [...]`. `tools/recamera-convert` makes both from a YOLOv8/YOLO11
+`.pt` or `.onnx` on a PC (Sophgo's TPU-MLIR in Docker; see its README). Ultralytics weights are AGPL-3.0, so none ship in the
 image or the repository; `scripts/models.sh` extracts the four factory YOLO11n models from
 the official Seeed image, and the YOLO page uploads your own.
 

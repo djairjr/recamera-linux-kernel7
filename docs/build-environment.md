@@ -18,6 +18,7 @@ hand, kept in `/tmp`, or left in loose folders outside the tree.
 | `external/package/recamera-tests` | the port's check programs (`recamera-iontest`, `-ioninfo`, `-fencetso`) | the package, from `tests/` |
 | `tests/` | sources of the check programs | source |
 | `app/` | the Rust application: Cargo workspace, MIT/Apache-2.0; `Cargo.lock` versioned | source; package `recamera-app` |
+| `tools/recamera-convert/` | PC tool: YOLO `.pt`/`.onnx` → `.cvimodel` + `.json` (TPU-MLIR in Docker) | `cargo build --release` on the host |
 | `scripts/` | deployment, ports, models, diagnostics (§4) | source |
 | `docs/` | documentation | source |
 | `output/` | Buildroot output (`images/`: `sdcard.img`, `rootfs.ext4`, `boot.itb`, `fip.bin`) | `make` |

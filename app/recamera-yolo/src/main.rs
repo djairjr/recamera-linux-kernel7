@@ -25,6 +25,7 @@ Options:
   -t, --threshold T     minimum score, 0..1 (default 0.5)
       --nms T           NMS IoU threshold (default 0.45)
   -n, --repeat N        run each frame N times and print the mean time
+      --stats           also print min/max of the first channels of each output
   -h, --help            this help
   -V, --version         version of the program and of the system image
 ";
@@ -42,6 +43,7 @@ struct Args {
     thr: f32,
     nms: f32,
     repeat: u32,
+    stats: bool,
     frames: Vec<PathBuf>,
 }
 
@@ -53,6 +55,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
         thr: 0.5,
         nms: 0.45,
         repeat: 1,
+        stats: false,
         frames: Vec::new(),
     };
     let mut p = lexopt::Parser::from_env();
@@ -66,6 +69,7 @@ fn parse_args() -> Result<Option<Args>, lexopt::Error> {
             Short('t') | Long("threshold") => a.thr = p.value()?.parse()?,
             Long("nms") => a.nms = p.value()?.parse()?,
             Short('n') | Long("repeat") => a.repeat = p.value()?.parse::<u32>()?.max(1),
+            Long("stats") => a.stats = true,
             Short('h') | Long("help") => {
                 print!("{HELP}");
                 return Ok(None);
@@ -148,6 +152,14 @@ fn main() -> ExitCode {
             continue;
         }
         let ms = t.elapsed().as_secs_f64() * 1000.0 / a.repeat as f64;
+        if a.stats {
+            for (name, shape, mm) in yolo.output_stats(8) {
+                println!("# output {name} {shape:?}");
+                for (c, (lo, hi)) in mm.iter().enumerate() {
+                    println!("#   channel {c}: {lo} .. {hi}");
+                }
+            }
+        }
         if yolo.task() == Task::Classify {
             println!("# {}: {ms:.1} ms (copy + inference + decoding)", f.display());
             for (c, p) in &res.top {
